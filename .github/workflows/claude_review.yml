@@ -1,0 +1,47 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: ['opened', 'ready_for_review', 'reopened', 'synchronize']
+
+jobs:
+  claude-code-review:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            **GitHub PR Context:**
+            - Repository: ${{ github.repository }}
+            - PR Number: ${{ github.event.pull_request.number }}
+            - Base Branch: ${{ github.event.pull_request.base.ref }}
+            - Head Branch: ${{ github.event.pull_request.head.ref }}
+            - PR Title: ${{ github.event.pull_request.title }}
+
+            **Your Task:**
+            Review this pull request. Focus on correctness, security issues
+            (this repo has ingress handlers parsing external webhook payloads --
+            check for SSRF, injection, and unvalidated redirects especially),
+            test coverage, and consistency with patterns already established
+            elsewhere in this codebase.
+
+            **Output Requirements:**
+            - Post inline comments for specific issues using the GitHub tools
+            - Provide a concise summary at the end
+            - Flag any critical blocking issues clearly
+
+            Start your analysis now.
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,TodoWrite"
