@@ -222,7 +222,7 @@ func TestParseCertPublicKey(t *testing.T) {
 	t.Run("valid rsa cert", func(t *testing.T) {
 		pub, err := parseCertPublicKey(selfSignedPEM(t, key))
 		require.NoError(t, err)
-		assert.Equal(t, key.PublicKey.N, pub.N)
+		assert.Equal(t, key.N, pub.N)
 	})
 
 	t.Run("no pem block", func(t *testing.T) {
