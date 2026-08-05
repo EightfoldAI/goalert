@@ -421,6 +421,17 @@ input AlertMetadataInput {
   value: String!
 }
 
+input SetAlertMetadataInput {
+  alertID: Int!
+
+  """
+  Meta keys provided here are merged into the alert's existing metadata;
+  keys not listed are left untouched. To delete a key, set it to an empty
+  string.
+  """
+  meta: [AlertMetadataInput!]!
+}
+
 input CreateAlertInput {
   summary: String!
   details: String

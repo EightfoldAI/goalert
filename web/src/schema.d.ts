@@ -793,6 +793,7 @@ export interface Mutation {
   reEncryptKeyringsAndConfig: boolean
   sendContactMethodVerification: boolean
   sendSignal: boolean
+  setAlertMetadata: boolean
   setAlertNoiseReason: boolean
   setConfig: boolean
   setFavorite: boolean
@@ -1123,6 +1124,11 @@ export interface ServiceSearchOptions {
   omit?: null | string[]
   only?: null | string[]
   search?: null | string
+}
+
+export interface SetAlertMetadataInput {
+  alertID: number
+  meta: AlertMetadataInput[]
 }
 
 export interface SetAlertNoiseReasonInput {

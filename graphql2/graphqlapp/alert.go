@@ -453,6 +453,40 @@ func (m *Mutation) CreateAlert(ctx context.Context, input graphql2.CreateAlertIn
 	return newAlert, nil
 }
 
+// SetAlertMetadata merges the given key/value pairs into an existing alert's
+// metadata. Keys not listed are left untouched -- this is a merge, not a
+// replace, even though the underlying store call replaces the whole document;
+// existing values are read first and folded in so a caller setting one key
+// cannot wipe out metadata set by whatever created the alert.
+func (m *Mutation) SetAlertMetadata(ctx context.Context, input graphql2.SetAlertMetadataInput) (bool, error) {
+	add := make(map[string]string, len(input.Meta))
+	for _, kv := range input.Meta {
+		add[kv.Key] = kv.Value
+	}
+
+	err := withContextTx(ctx, m.DB, func(ctx context.Context, tx *sql.Tx) error {
+		existing, err := m.AlertStore.Metadata(ctx, tx, input.AlertID)
+		if err != nil {
+			return err
+		}
+
+		merged := make(map[string]string, len(existing)+len(add))
+		for k, v := range existing {
+			merged[k] = v
+		}
+		for k, v := range add {
+			merged[k] = v
+		}
+
+		return m.AlertStore.SetMetadataTx(ctx, tx, input.AlertID, merged)
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 func (a *Alert) NoiseReason(ctx context.Context, raw *alert.Alert) (*string, error) {
 	am, err := (*App)(a).FindOneAlertFeedback(ctx, raw.ID)
 	if err != nil {

@@ -492,6 +492,7 @@ type ComplexityRoot struct {
 		ReEncryptKeyringsAndConfig         func(childComplexity int) int
 		SendContactMethodVerification      func(childComplexity int, input SendContactMethodVerificationInput) int
 		SendSignal                         func(childComplexity int, input SendSignalInput) int
+		SetAlertMetadata                   func(childComplexity int, input SetAlertMetadataInput) int
 		SetAlertNoiseReason                func(childComplexity int, input SetAlertNoiseReasonInput) int
 		SetConfig                          func(childComplexity int, input []ConfigValueInput) int
 		SetFavorite                        func(childComplexity int, input SetFavoriteInput) int
@@ -982,6 +983,7 @@ type MutationResolver interface {
 	CreateAlert(ctx context.Context, input CreateAlertInput) (*alert.Alert, error)
 	CloseMatchingAlert(ctx context.Context, input CloseMatchingAlertInput) (bool, error)
 	SetAlertNoiseReason(ctx context.Context, input SetAlertNoiseReasonInput) (bool, error)
+	SetAlertMetadata(ctx context.Context, input SetAlertMetadataInput) (bool, error)
 	CreateService(ctx context.Context, input CreateServiceInput) (*service.Service, error)
 	CreateEscalationPolicy(ctx context.Context, input CreateEscalationPolicyInput) (*escalation.Policy, error)
 	CreateEscalationPolicyStep(ctx context.Context, input CreateEscalationPolicyStepInput) (*escalation.Step, error)
@@ -2895,6 +2897,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.SendSignal(childComplexity, args["input"].(SendSignalInput)), true
+	case "Mutation.setAlertMetadata":
+		if e.ComplexityRoot.Mutation.SetAlertMetadata == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_setAlertMetadata_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.SetAlertMetadata(childComplexity, args["input"].(SetAlertMetadataInput)), true
 	case "Mutation.setAlertNoiseReason":
 		if e.ComplexityRoot.Mutation.SetAlertNoiseReason == nil {
 			break
@@ -4973,6 +4986,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 		ec.unmarshalInputSendSignalInput,
 		ec.unmarshalInputServiceAlertStatsOptions,
 		ec.unmarshalInputServiceSearchOptions,
+		ec.unmarshalInputSetAlertMetadataInput,
 		ec.unmarshalInputSetAlertNoiseReasonInput,
 		ec.unmarshalInputSetFavoriteInput,
 		ec.unmarshalInputSetLabelInput,
@@ -7067,6 +7081,20 @@ func (ec *executionContext) field_Mutation_sendSignal_args(ctx context.Context, 
 	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "input",
 		func(ctx context.Context, v any) (SendSignalInput, error) {
 			return ec.unmarshalNSendSignalInput2githubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐSendSignalInput(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["input"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_setAlertMetadata_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "input",
+		func(ctx context.Context, v any) (SetAlertMetadataInput, error) {
+			return ec.unmarshalNSetAlertMetadataInput2githubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐSetAlertMetadataInput(ctx, v)
 		})
 	if err != nil {
 		return nil, err
@@ -14728,6 +14756,50 @@ func (ec *executionContext) fieldContext_Mutation_setAlertNoiseReason(ctx contex
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_setAlertNoiseReason_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_setAlertMetadata(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_setAlertMetadata(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().SetAlertMetadata(ctx, fc.Args["input"].(SetAlertMetadataInput))
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_setAlertMetadata(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_setAlertMetadata_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -27621,6 +27693,43 @@ func (ec *executionContext) unmarshalInputServiceSearchOptions(ctx context.Conte
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputSetAlertMetadataInput(ctx context.Context, obj any) (SetAlertMetadataInput, error) {
+	var it SetAlertMetadataInput
+	if obj == nil {
+		return it, nil
+	}
+
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"alertID", "meta"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "alertID":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("alertID"))
+			data, err := ec.unmarshalNInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.AlertID = data
+		case "meta":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("meta"))
+			data, err := ec.unmarshalNAlertMetadataInput2ᚕgithubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐAlertMetadataInputᚄ(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Meta = data
+		}
+	}
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputSetAlertNoiseReasonInput(ctx context.Context, obj any) (SetAlertNoiseReasonInput, error) {
 	var it SetAlertNoiseReasonInput
 	if obj == nil {
@@ -33405,6 +33514,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "setAlertNoiseReason":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_setAlertNoiseReason(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "setAlertMetadata":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_setAlertMetadata(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -39428,6 +39544,21 @@ func (ec *executionContext) unmarshalNAlertMetadataInput2githubᚗcomᚋtarget�
 	return res, graphql.ErrorOnPath(ctx, err)
 }
 
+func (ec *executionContext) unmarshalNAlertMetadataInput2ᚕgithubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐAlertMetadataInputᚄ(ctx context.Context, v any) ([]AlertMetadataInput, error) {
+	var vSlice []any
+	vSlice = graphql.CoerceList(v)
+	var err error
+	res := make([]AlertMetadataInput, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNAlertMetadataInput2githubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐAlertMetadataInput(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
 func (ec *executionContext) marshalNAlertPendingNotification2githubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐAlertPendingNotification(ctx context.Context, sel ast.SelectionSet, v AlertPendingNotification) graphql.Marshaler {
 	return ec._AlertPendingNotification(ctx, sel, &v)
 }
@@ -41089,6 +41220,11 @@ func (ec *executionContext) marshalNServiceOnCallUser2ᚕgithubᚗcomᚋtarget�
 	}
 
 	return ret
+}
+
+func (ec *executionContext) unmarshalNSetAlertMetadataInput2githubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐSetAlertMetadataInput(ctx context.Context, v any) (SetAlertMetadataInput, error) {
+	res, err := ec.unmarshalInputSetAlertMetadataInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
 }
 
 func (ec *executionContext) unmarshalNSetAlertNoiseReasonInput2githubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐSetAlertNoiseReasonInput(ctx context.Context, v any) (SetAlertNoiseReasonInput, error) {

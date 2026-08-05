@@ -719,6 +719,14 @@ type ServiceSearchOptions struct {
 	FavoritesFirst *bool `json:"favoritesFirst,omitempty"`
 }
 
+type SetAlertMetadataInput struct {
+	AlertID int `json:"alertID"`
+	// Meta keys provided here are merged into the alert's existing metadata;
+	// keys not listed are left untouched. To delete a key, set it to an empty
+	// string.
+	Meta []AlertMetadataInput `json:"meta"`
+}
+
 type SetAlertNoiseReasonInput struct {
 	AlertID     int    `json:"alertID"`
 	NoiseReason string `json:"noiseReason"`
