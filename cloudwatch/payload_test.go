@@ -266,26 +266,59 @@ func TestBuildAlert_CloudWatch(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed arn", func(t *testing.T) {
+	// The real deployment is one SNS topic (in one region) receiving alarms from
+	// every region, so a topic's own region and a given alarm's region routinely
+	// differ. Region must reflect the alarm, not the topic -- otherwise "Region:"
+	// and the Console link (which always uses the alarm's own ARN) could show
+	// two different regions on the same alert.
+	t.Run("cross-region: alarm's own region wins over the topic's", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm,
+			`"AlarmArn": "arn:aws:cloudwatch:us-west-2:123456789012:alarm:x"`,
+			`"AlarmArn": "arn:aws:cloudwatch:us-east-1:123456789012:alarm:x"`, 1)
+		// testTopicARN is us-west-2; the alarm itself is us-east-1.
+		a, meta, ok := buildAlert(notification(body))
+		require.True(t, ok)
+
+		assert.Contains(t, a.Details, "Region: us-east-1")
+		assert.NotContains(t, a.Details, "Region: us-west-2")
+		assert.Equal(t, "us-east-1", meta["region"])
+
+		// The Console link must agree with the Region line, not the topic.
+		assert.Contains(t, a.Details, "Console: https://us-east-1.console.aws.amazon.com/")
+		assert.NotContains(t, a.Details, "console.aws.amazon.com/cloudwatch/home?region=us-west-2")
+
+		// Topic still correctly reflects the topic ARN -- only region changes.
+		assert.Contains(t, a.Details, "Topic: PagerDuty-Data")
+		assert.Equal(t, "PagerDuty-Data", meta["topic"])
+	})
+
+	t.Run("malformed topic arn still falls back to the alarm's own region", func(t *testing.T) {
 		e := envelope{Type: typeNotification, TopicARN: "arn:aws:sns", Message: goldenAlarm}
 		a, meta, ok := buildAlert(e)
 		require.True(t, ok)
 
-		assert.NotContains(t, a.Details, "Region:")
+		// A malformed topic ARN yields no region on its own, but AlarmArn (present
+		// in goldenAlarm) is independently valid, so region is still populated.
+		assert.Contains(t, a.Details, "Region: us-west-2")
+		assert.Equal(t, "us-west-2", meta["region"])
+
 		assert.Contains(t, a.Details, "Topic: sns")
 		assert.Equal(t, "sns", meta["topic"])
-		assert.NotContains(t, meta, "region")
 	})
 
-	t.Run("empty arn", func(t *testing.T) {
+	t.Run("empty topic arn falls back to the alarm's own region", func(t *testing.T) {
 		e := envelope{Type: typeNotification, Message: goldenAlarm}
 		a, meta, ok := buildAlert(e)
 		require.True(t, ok)
 
-		assert.NotContains(t, a.Details, "Region:")
+		// Region has an alarm-level fallback (AlarmArn, present in goldenAlarm),
+		// so it's populated even with no topic ARN at all.
+		assert.Contains(t, a.Details, "Region: us-west-2")
+		assert.Equal(t, "us-west-2", meta["region"])
+
+		// Topic has no alarm-level equivalent to fall back to.
 		assert.NotContains(t, a.Details, "Topic:")
 		assert.NotContains(t, meta, "topic")
-		assert.NotContains(t, meta, "region")
 		assert.Equal(t, testAlarmName, a.Summary)
 	})
 

@@ -84,6 +84,16 @@ func buildAlert(e envelope) (a alert.Alert, meta map[string]string, ok bool) {
 }
 
 func buildAlarm(al cloudWatchAlarm, region, topic string) (alert.Alert, map[string]string, bool) {
+	// region is derived from the SNS topic's ARN, which is only the alarm's
+	// true region by coincidence: the deployed architecture is one topic
+	// receiving alarms from every region, so a topic's region and a given
+	// alarm's region routinely differ. Prefer the alarm's own ARN when it
+	// parses -- otherwise "Region:" here can silently disagree with the
+	// Console link below, which always uses the alarm's own ARN.
+	if alarmRegion, _, ok := parseAlarmARN(al.AlarmARN); ok {
+		region = alarmRegion
+	}
+
 	if strings.EqualFold(al.NewStateValue, "INSUFFICIENT_DATA") {
 		return alert.Alert{}, nil, false
 	}
@@ -147,16 +157,25 @@ func alarmDetails(al cloudWatchAlarm, region, topic string) string {
 // than a broken link -- ARN is attacker-influenced (it's a field in the signed
 // payload, but not otherwise validated), and malformed input must degrade
 // gracefully like every other field here.
-func alarmConsoleURL(arn string) string {
-	// arn:aws:cloudwatch:<region>:<account>:alarm:<name> -- SplitN(...,7) so a
-	// name containing a literal colon (unusual, but not disallowed) stays whole
-	// in the last segment rather than being truncated.
+// parseAlarmARN extracts the region and alarm name from a CloudWatch alarm
+// ARN, e.g. arn:aws:cloudwatch:us-west-2:123456789012:alarm:AlarmName.
+func parseAlarmARN(arn string) (region, name string, ok bool) {
+	// SplitN(...,7) so a name containing a literal colon (unusual, but not
+	// disallowed) stays whole in the last segment rather than being truncated.
 	parts := strings.SplitN(arn, ":", 7)
 	if len(parts) != 7 || parts[0] != "arn" || parts[2] != "cloudwatch" || parts[5] != "alarm" {
-		return ""
+		return "", "", false
 	}
-	region, name := parts[3], parts[6]
+	region, name = parts[3], parts[6]
 	if region == "" || name == "" {
+		return "", "", false
+	}
+	return region, name, true
+}
+
+func alarmConsoleURL(arn string) string {
+	region, name, ok := parseAlarmARN(arn)
+	if !ok {
 		return ""
 	}
 
