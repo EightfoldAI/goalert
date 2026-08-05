@@ -54,31 +54,32 @@ type envelope struct {
 
 // signedField returns the value of a field in the string-to-sign, and whether it
 // is present at all. Absent fields are omitted from the canonical string rather
-// than contributing an empty value.
-func (e *envelope) signedField(name string) (value string, present bool) {
+// than contributing an empty value. An unknown name is a bug in signedFields,
+// not attacker input, but is still returned as an error rather than a panic so
+// a mistake there degrades to a rejected message instead of a crashed request.
+func (e *envelope) signedField(name string) (value string, present bool, err error) {
 	switch name {
 	case "Message":
-		return e.Message, true
+		return e.Message, true, nil
 	case "MessageId":
-		return e.MessageID, true
+		return e.MessageID, true, nil
 	case "Subject":
 		if e.Subject == nil {
-			return "", false
+			return "", false, nil
 		}
-		return *e.Subject, true
+		return *e.Subject, true, nil
 	case "SubscribeURL":
-		return e.SubscribeURL, true
+		return e.SubscribeURL, true, nil
 	case "Timestamp":
-		return e.Timestamp, true
+		return e.Timestamp, true, nil
 	case "Token":
-		return e.Token, true
+		return e.Token, true, nil
 	case "TopicArn":
-		return e.TopicARN, true
+		return e.TopicARN, true, nil
 	case "Type":
-		return e.Type, true
+		return e.Type, true, nil
 	}
-	// Unreachable: signedFields is a package-level literal.
-	panic("cloudwatch: unknown signed field " + name)
+	return "", false, fmt.Errorf("cloudwatch: unknown signed field %q", name)
 }
 
 // canonicalString builds the AWS SNS string-to-sign. It is pure: no I/O, no
@@ -91,7 +92,10 @@ func canonicalString(e *envelope) (string, error) {
 
 	var b strings.Builder
 	for _, f := range fields {
-		v, present := e.signedField(f)
+		v, present, err := e.signedField(f)
+		if err != nil {
+			return "", err
+		}
 		if !present {
 			continue
 		}
