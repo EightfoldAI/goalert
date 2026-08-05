@@ -730,8 +730,8 @@ type ServiceSearchOptions struct {
 type SetAlertMetadataInput struct {
 	AlertID int `json:"alertID"`
 	// Meta keys provided here are merged into the alert's existing metadata;
-	// keys not listed are left untouched. To delete a key, set it to an empty
-	// string.
+	// keys not listed are left untouched. There is no delete: an empty value is
+	// stored as an empty string and the key is still returned by Alert.meta.
 	Meta []AlertMetadataInput `json:"meta"`
 }
 

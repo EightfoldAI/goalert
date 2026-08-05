@@ -17,6 +17,17 @@ const (
 	// unlimited entries. SNS's real working set is one or two certs.
 	maxCachedCerts = 32
 
+	// maxCachedCertFailures bounds the negative cache, for the same reason as
+	// maxCachedCerts: its keys are attacker-supplied. Larger than the positive
+	// bound because failures are the higher-cardinality case by nature.
+	maxCachedCertFailures = 128
+
+	// certFailureTTL is how long a URL that did not yield a usable key is refused
+	// without a refetch. Deliberately short: a legitimate cert URL that fails for
+	// an unrelated reason must not stay poisoned, and the caller answers 503 so the
+	// delivery is retried well after this expires.
+	certFailureTTL = 30 * time.Second
+
 	// maxCertBytes bounds the response read. The inbound request body limit does
 	// not apply to responses we fetch.
 	maxCertBytes = 16 * 1024
@@ -31,15 +42,33 @@ const (
 // with new key material, verification would fail until restart.
 //
 // Eviction is FIFO rather than LRU: with a working set of one or two, insertion
-// order is sufficient and far simpler.
+// order is sufficient and far simpler. Only a successfully parsed key is ever
+// inserted, so a URL that never yields one cannot evict a working entry.
+//
+// Failures are tracked separately and briefly. Without that, a key holder could
+// send a stream of distinct `https://sns.<region>.amazonaws.com/<random>.pem`
+// URLs, each one missing the cache and costing a real outbound fetch that holds a
+// request goroutine for up to certFetchTimeout. Nothing else rate-limits this
+// path: calllimiter.RoundTripper is a no-op unless a limiter is in the context,
+// and ingress does not install one.
 type certCache struct {
 	mx    sync.Mutex
 	keys  map[string]*rsa.PublicKey
 	order []string
+
+	failed      map[string]time.Time
+	failedOrder []string
+
+	// now is a field so the TTL is testable without sleeping.
+	now func() time.Time
 }
 
 func newCertCache() *certCache {
-	return &certCache{keys: make(map[string]*rsa.PublicKey, maxCachedCerts)}
+	return &certCache{
+		keys:   make(map[string]*rsa.PublicKey, maxCachedCerts),
+		failed: make(map[string]time.Time, maxCachedCertFailures),
+		now:    time.Now,
+	}
 }
 
 func (c *certCache) get(key string) (*rsa.PublicKey, bool) {
@@ -64,6 +93,30 @@ func (c *certCache) put(key string, pub *rsa.PublicKey) {
 	c.order = append(c.order, key)
 }
 
+// recentlyFailed reports whether key failed within certFailureTTL.
+func (c *certCache) recentlyFailed(key string) bool {
+	c.mx.Lock()
+	defer c.mx.Unlock()
+
+	at, ok := c.failed[key]
+	return ok && c.now().Sub(at) < certFailureTTL
+}
+
+// putFailure records that key did not yield a usable key.
+func (c *certCache) putFailure(key string) {
+	c.mx.Lock()
+	defer c.mx.Unlock()
+
+	if _, ok := c.failed[key]; !ok {
+		for len(c.failedOrder) >= maxCachedCertFailures {
+			delete(c.failed, c.failedOrder[0])
+			c.failedOrder = c.failedOrder[1:]
+		}
+		c.failedOrder = append(c.failedOrder, key)
+	}
+	c.failed[key] = c.now()
+}
+
 // publicKey returns the RSA public key for the signing cert at rawURL, fetching
 // and caching it if needed. rawURL is validated against the host allowlist
 // before any request is made; dial maps the validated URL to the origin to
@@ -79,6 +132,9 @@ func (c *certCache) publicKey(ctx context.Context, hc *http.Client, dial func(*u
 	// serialize every request behind a single AWS call.
 	if pub, ok := c.get(key); ok {
 		return pub, nil
+	}
+	if c.recentlyFailed(key) {
+		return nil, fmt.Errorf("cloudwatch: signing certificate %q failed recently", key)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, certFetchTimeout)
@@ -98,6 +154,11 @@ func (c *certCache) publicKey(ctx context.Context, hc *http.Client, dial func(*u
 	// A blocked redirect also lands here, since the client is configured to
 	// surface 3xx rather than follow it.
 	if resp.StatusCode != http.StatusOK {
+		// Negative-cached: the status is a property of this URL, so refetching it
+		// changes nothing until the TTL lapses. Transport errors above deliberately
+		// are not cached -- those are about connectivity, and caching them would
+		// poison a legitimate cert URL through a transient blip.
+		c.putFailure(key)
 		return nil, fmt.Errorf("cloudwatch: fetch signing certificate: %s", resp.Status)
 	}
 
@@ -106,10 +167,11 @@ func (c *certCache) publicKey(ctx context.Context, hc *http.Client, dial func(*u
 		return nil, fmt.Errorf("cloudwatch: read signing certificate: %w", err)
 	}
 
-	// Only a successfully parsed key is cached, so a 404 or garbage body caches
-	// nothing.
+	// Only a successfully parsed key is cached, so a garbage body never becomes a
+	// usable entry -- and, since it also never joins order, never evicts one.
 	pub, err := parseCertPublicKey(body)
 	if err != nil {
+		c.putFailure(key)
 		return nil, err
 	}
 	c.put(key, pub)

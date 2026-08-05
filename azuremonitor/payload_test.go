@@ -816,6 +816,51 @@ func TestBuildAlert_DistinctAlertIDs(t *testing.T) {
 	assert.NotEqual(t, first.Dedup.Payload, second.Dedup.Payload)
 }
 
+// TestBuildAlert_MissingAlertIDStillDistinct pins the dedupKey fallback. Hashing a
+// bare "" would give every alertId-less payload one shared key, so unrelated
+// alerts would collapse onto a single alert and any one Resolved delivery would
+// close all of them.
+func TestBuildAlert_MissingAlertIDStillDistinct(t *testing.T) {
+	body := func(rule, ruleID, fired string) string {
+		return `{
+  "schemaId": "azureMonitorCommonAlertSchema",
+  "data": {"essentials": {
+    "alertRule": "` + rule + `",
+    "alertRuleId": "` + ruleID + `",
+    "firedDateTime": "` + fired + `",
+    "monitorCondition": "Fired"
+  }}
+}`
+	}
+
+	dedupOf := func(t *testing.T, payload string) string {
+		t.Helper()
+		a, _, _, err := buildAlert([]byte(payload))
+		require.NoError(t, err)
+		require.NotNil(t, a.Dedup, "dedup must never be nil: nil falls back to a content hash")
+		require.Len(t, a.Dedup.Payload, 64)
+		return a.Dedup.Payload
+	}
+
+	var (
+		cpuA  = dedupOf(t, body("high-cpu", "/subscriptions/s/rules/cpu", "2026-08-05T10:00:00Z"))
+		memA  = dedupOf(t, body("high-mem", "/subscriptions/s/rules/mem", "2026-08-05T10:00:00Z"))
+		cpuA2 = dedupOf(t, body("high-cpu", "/subscriptions/s/rules/cpu", "2026-08-05T11:30:00Z"))
+	)
+
+	assert.NotEqual(t, cpuA, memA, "different rules must not share a dedup key")
+	assert.NotEqual(t, cpuA, cpuA2, "separate firings of one rule must not share a dedup key")
+
+	// The Resolved delivery of a firing must still match its own Fired delivery,
+	// or it can never close it. resolvedDateTime is deliberately excluded from the
+	// key for exactly this reason.
+	resolved := strings.Replace(
+		body("high-cpu", "/subscriptions/s/rules/cpu", "2026-08-05T10:00:00Z"),
+		`"monitorCondition": "Fired"`,
+		`"monitorCondition": "Resolved", "resolvedDateTime": "2026-08-05T10:45:00Z"`, 1)
+	assert.Equal(t, cpuA, dedupOf(t, resolved), "Resolved must share the Fired dedup key")
+}
+
 func TestStringProps_StripsHTMLAndSkipsNonStrings(t *testing.T) {
 	body := `{
   "schemaId": "azureMonitorCommonAlertSchema",

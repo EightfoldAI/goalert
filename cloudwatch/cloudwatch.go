@@ -21,6 +21,7 @@ package cloudwatch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,27 +53,51 @@ type Config struct {
 	IntegrationKeyStore *integrationkey.Store
 
 	// Client is used to fetch signing certificates and confirm subscriptions. If
-	// nil, a default is used. A supplied client MUST NOT follow redirects.
+	// nil, a default is used. A supplied client must not follow redirects;
+	// NewHandler enforces that when CheckRedirect is unset.
 	Client *http.Client
 
 	// BaseURL overrides the origin used for outbound requests. Testing only; the
 	// host allowlist still runs against the message-supplied URL first.
 	BaseURL string
+
+	// MaxMessageAge bounds how old a signed Timestamp may be before the message is
+	// refused as a replay. Zero uses defaultMaxMessageAge.
+	//
+	// Widen this for a subscription with a custom delivery policy: SNS allows up to
+	// 100 retries with an hour of backoff, and a redelivery arriving past the
+	// window is refused permanently rather than retried.
+	MaxMessageAge time.Duration
 }
 
 // Handler serves the CloudWatch/SNS ingress endpoint.
 type Handler struct {
-	cfg   Config
-	base  *url.URL
-	hc    *http.Client
-	certs *certCache
+	cfg    Config
+	base   *url.URL
+	hc     *http.Client
+	certs  *certCache
+	maxAge time.Duration
 }
 
 // NewHandler returns a Handler for the given config.
 func NewHandler(cfg Config) (*Handler, error) {
-	h := &Handler{cfg: cfg, hc: cfg.Client, certs: newCertCache()}
+	h := &Handler{cfg: cfg, hc: cfg.Client, certs: newCertCache(), maxAge: cfg.MaxMessageAge}
+	if h.maxAge <= 0 {
+		h.maxAge = defaultMaxMessageAge
+	}
 	if h.hc == nil {
 		h.hc = defaultClient()
+	}
+	if h.hc.CheckRedirect == nil {
+		// Enforced here rather than trusted to the caller: not following redirects
+		// is the load-bearing half of the SSRF control (the allowlist only covers
+		// the first hop), and the cert fetch happens before signature verification.
+		// A caller passing a plain &http.Client{} would silently reopen that hole.
+		h.hc = &http.Client{
+			Transport:     h.hc.Transport,
+			Timeout:       h.hc.Timeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 	if cfg.BaseURL != "" {
 		u, err := url.Parse(cfg.BaseURL)
@@ -135,7 +160,7 @@ func (h *Handler) ServeIncoming(w http.ResponseWriter, r *http.Request) {
 	// surface as a confusing 400 or 403.
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	data, err := io.ReadAll(r.Body)
-	if errutil.HTTPError(ctx, w, err) {
+	if errutil.HTTPErrorRetry(ctx, w, err) {
 		return
 	}
 
@@ -178,14 +203,22 @@ func (h *Handler) ServeIncoming(w http.ResponseWriter, r *http.Request) {
 
 	pub, err := h.certs.publicKey(ctx, h.hc, h.dialURL, u.String())
 	if err != nil {
-		// Transient: 500 so SNS retries rather than dropping the alarm.
+		// Transient: 503 so SNS retries rather than dropping the alarm.
 		log.Log(ctx, fmt.Errorf("cloudwatch: signing certificate: %w", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		serverError(w)
 		return
 	}
 
-	if err := verifyMessage(time.Now(), pub, &e); err != nil {
-		log.Logf(ctx, "cloudwatch: %v", err)
+	if err := verifyMessage(time.Now(), h.maxAge, pub, &e); err != nil {
+		// The response is the same 403 either way -- the client must not learn which
+		// check failed -- but the log separates them, because only one is actionable:
+		// a stale message means the host clock is off or MaxMessageAge is too tight
+		// for this subscription's retry policy, whereas a forged one needs nothing.
+		if errors.Is(err, errStaleMessage) {
+			log.Log(ctx, fmt.Errorf("cloudwatch: refused stale message: %w", err))
+		} else {
+			log.Logf(ctx, "cloudwatch: %v", err)
+		}
 		clientError(w, http.StatusForbidden)
 		return
 	}
@@ -224,14 +257,14 @@ func (h *Handler) serveConfirmation(ctx context.Context, w http.ResponseWriter, 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, h.dialURL(u).String(), nil)
 	if err != nil {
 		log.Log(ctx, fmt.Errorf("cloudwatch: build confirmation request: %w", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		serverError(w)
 		return
 	}
 
 	resp, err := h.hc.Do(req)
 	if err != nil {
 		log.Log(ctx, fmt.Errorf("cloudwatch: confirm subscription: %w", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		serverError(w)
 		return
 	}
 	// Drain and close for connection reuse. The body is never inspected and never
@@ -240,9 +273,9 @@ func (h *Handler) serveConfirmation(ctx context.Context, w http.ResponseWriter, 
 	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// 500 so SNS re-sends; the confirmation token stays valid for 3 days.
+		// 503 so SNS re-sends; the confirmation token stays valid for 3 days.
 		log.Log(ctx, fmt.Errorf("cloudwatch: confirm subscription: %s", resp.Status))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		serverError(w)
 		return
 	}
 
@@ -279,7 +312,9 @@ func (h *Handler) serveNotification(ctx context.Context, w http.ResponseWriter, 
 		retry.Limit(5),
 		retry.FibBackoff(250*time.Millisecond),
 	)
-	if errutil.HTTPError(ctx, w, err) {
+	// HTTPErrorRetry, not HTTPError: the retries above are already exhausted, so an
+	// error here is an infrastructure failure and 503 asks SNS to keep trying.
+	if errutil.HTTPErrorRetry(ctx, w, err) {
 		return
 	}
 
@@ -296,4 +331,12 @@ func (h *Handler) serveNotification(ctx context.Context, w http.ResponseWriter, 
 // clientError writes a bare status text, never the underlying error.
 func clientError(w http.ResponseWriter, code int) {
 	http.Error(w, http.StatusText(code), code)
+}
+
+// serverError reports a transient infrastructure failure as 503 rather than 500.
+// SNS retries all 5xx so either would do here, but 503 keeps this handler's
+// contract identical to the sibling azuremonitor one, where the distinction is
+// load-bearing: Azure retries 503 and not 500.
+func serverError(w http.ResponseWriter) {
+	http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 }

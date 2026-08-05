@@ -490,34 +490,39 @@ func (m *Mutation) SetAlertMetadata(ctx context.Context, input graphql2.SetAlert
 // AppendAlertDetails appends text to an existing alert's Details, separated by
 // a blank line from whatever is already there.
 //
-// Unlike SetAlertMetadata this reads the current row via AlertStore.FindOne
-// rather than a merge-friendly key/value store: Details is free text with no
-// per-key structure, so preserving existing content means literally reading
-// it and appending. FindOne is not transaction-aware, so the read happens
-// before the write's transaction starts -- the same best-effort consistency
-// already accepted for SetAlertMetadata's read-then-write, not a new gap.
+// Unlike SetAlertMetadata there is no merge-friendly key/value store to fold into:
+// Details is free text with no per-key structure, so preserving existing content
+// means reading it and appending. The read therefore takes a row lock and happens
+// inside the write's transaction -- without the lock, two concurrent appends (or
+// an append racing an ingress CreateOrUpdate that rewrites details) both read the
+// same original and the second silently discards the first while still returning
+// true.
+//
+// The append is deliberately not pushed down into SQL, which would remove the read
+// entirely: SanitizeText's rune-aware truncation and "…" marker are applied to the
+// combined text, and left() over bytes is not equivalent.
 func (m *Mutation) AppendAlertDetails(ctx context.Context, input graphql2.AppendAlertDetailsInput) (bool, error) {
-	current, err := m.AlertStore.FindOne(ctx, input.AlertID)
-	if errors.Is(err, sql.ErrNoRows) {
-		// FindOne's bare sql.ErrNoRows is an implementation detail; a missing
-		// AlertID is a client input error, not a server fault -- translating it
-		// keeps it out of the error-level server logs (the smoke harness treats
-		// any error-level log line as a test failure) and gives the caller an
-		// actionable message instead of a raw SQL error string.
-		return false, validation.NewFieldError("AlertID", "not found")
-	}
-	if err != nil {
-		return false, err
-	}
+	err := withContextTx(ctx, m.DB, func(ctx context.Context, tx *sql.Tx) error {
+		current, err := m.AlertStore.LockDetailsTx(ctx, tx, input.AlertID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The bare sql.ErrNoRows is an implementation detail; a missing AlertID is
+			// a client input error, not a server fault -- translating it keeps it out
+			// of the error-level server logs (the smoke harness treats any error-level
+			// log line as a test failure) and gives the caller an actionable message
+			// instead of a raw SQL error string.
+			return validation.NewFieldError("AlertID", "not found")
+		}
+		if err != nil {
+			return err
+		}
 
-	details := current.Details
-	if details != "" {
-		details += "\n\n"
-	}
-	details += input.Text
-	details = validate.SanitizeText(details, alert.MaxDetailsLength)
+		details := current
+		if details != "" {
+			details += "\n\n"
+		}
+		details += input.Text
+		details = validate.SanitizeText(details, alert.MaxDetailsLength)
 
-	err = withContextTx(ctx, m.DB, func(ctx context.Context, tx *sql.Tx) error {
 		return m.AlertStore.SetDetailsTx(ctx, tx, input.AlertID, details)
 	})
 	if err != nil {

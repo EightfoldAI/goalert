@@ -668,6 +668,33 @@ func (q *Queries) Alert_LockManyAlertServices(ctx context.Context, alertIds []in
 	return err
 }
 
+const alert_LockOneAlertDetails = `-- name: Alert_LockOneAlertDetails :one
+SELECT
+    details
+FROM
+    alerts
+WHERE
+    id = $1
+    -- ensure the alert is associated with the service, if coming from an integration
+    AND (service_id = $2
+        OR $2 IS NULL)
+FOR UPDATE
+`
+
+type Alert_LockOneAlertDetailsParams struct {
+	ID        int64
+	ServiceID uuid.NullUUID
+}
+
+// Returns the details for the alert and locks its row, so that a read-modify-write
+// of details cannot interleave with a concurrent one.
+func (q *Queries) Alert_LockOneAlertDetails(ctx context.Context, arg Alert_LockOneAlertDetailsParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, alert_LockOneAlertDetails, arg.ID, arg.ServiceID)
+	var details string
+	err := row.Scan(&details)
+	return details, err
+}
+
 const alert_LockOneAlertService = `-- name: Alert_LockOneAlertService :one
 SELECT
     maintenance_expires_at NOTNULL::bool AS is_maint_mode,
@@ -736,7 +763,6 @@ func (q *Queries) Alert_RequestAlertEscalationByTime(ctx context.Context, arg Al
 }
 
 const alert_ServiceEPHasSteps = `-- name: Alert_ServiceEPHasSteps :one
-
 SELECT
     EXISTS (
         SELECT
@@ -748,7 +774,6 @@ SELECT
             svc.id = $1)
 `
 
-// ensure the alert is associated with the service, if coming from an integration
 // Returns true if the Escalation Policy for the provided service has at least one step.
 func (q *Queries) Alert_ServiceEPHasSteps(ctx context.Context, serviceID uuid.UUID) (bool, error) {
 	row := q.db.QueryRowContext(ctx, alert_ServiceEPHasSteps, serviceID)
@@ -820,6 +845,7 @@ SET
 WHERE
     id = $1
     AND status != 'closed'
+    -- ensure the alert is associated with the service, if coming from an integration
     AND (service_id = $3
         OR $3 IS NULL)
 `

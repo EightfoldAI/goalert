@@ -16,11 +16,18 @@ import (
 // Freshness window for the signed Timestamp. Timestamp is inside the signed
 // field set but AWS does not check it for us, so without this a captured valid
 // envelope replays forever.
+//
+// defaultMaxMessageAge is a tradeoff, and it can lose alarms: past the window
+// every redelivery is refused, so a GoAlert outage longer than the window drops
+// the alarms SNS is still retrying. An hour comfortably covers SNS's default
+// HTTP/S retry policy (50 attempts, ~45 minutes), but a subscription with a
+// custom policy can legitimately redeliver for far longer -- hence
+// Config.MaxMessageAge.
 const (
-	maxMessageAge   = time.Hour
-	maxMessageSkew  = 5 * time.Minute
-	minCertKeyBits  = 2048
-	timestampFormat = "2006-01-02T15:04:05.000Z"
+	defaultMaxMessageAge = time.Hour
+	maxMessageSkew       = 5 * time.Minute
+	minCertKeyBits       = 2048
+	timestampFormat      = "2006-01-02T15:04:05.000Z"
 )
 
 // errBadSignature wraps every verification failure so the handler has exactly
@@ -28,11 +35,20 @@ const (
 // failed. Detail goes to the server log.
 var errBadSignature = errors.New("cloudwatch: signature verification failed")
 
-// verifyMessage verifies e's signature against pub and checks its freshness.
+// errStaleMessage marks a failure as "outside the freshness window" rather than
+// "bad signature". It wraps errBadSignature so the handler's single 403 branch
+// still covers it and the response stays indistinguishable, but the server log
+// can separate the two: a forged message needs no operator action, while a stale
+// one means the host clock is wrong or MaxMessageAge is too tight for this
+// subscription's retry policy.
+var errStaleMessage = fmt.Errorf("%w: outside freshness window", errBadSignature)
+
+// verifyMessage verifies e's signature against pub and checks that its Timestamp
+// is no more than maxAge old.
 //
 // Pure: no I/O. now is a parameter rather than time.Now() so the freshness
 // window is table-testable.
-func verifyMessage(now time.Time, pub *rsa.PublicKey, e *envelope) error {
+func verifyMessage(now time.Time, maxAge time.Duration, pub *rsa.PublicKey, e *envelope) error {
 	// Select the hash first: the canonical form could differ in a future
 	// version, so an unknown version must never fall back to SHA-1.
 	var hashID crypto.Hash
@@ -73,10 +89,10 @@ func verifyMessage(now time.Time, pub *rsa.PublicKey, e *envelope) error {
 		return fmt.Errorf("%w: %v", errBadSignature, err)
 	}
 
-	return checkFreshness(now, e.Timestamp)
+	return checkFreshness(now, maxAge, e.Timestamp)
 }
 
-func checkFreshness(now time.Time, timestamp string) error {
+func checkFreshness(now time.Time, maxAge time.Duration, timestamp string) error {
 	ts, err := time.Parse(timestampFormat, timestamp)
 	if err != nil {
 		// SNS also documents plain RFC3339.
@@ -86,11 +102,11 @@ func checkFreshness(now time.Time, timestamp string) error {
 		}
 	}
 
-	if age := now.Sub(ts); age > maxMessageAge {
-		return fmt.Errorf("%w: message is %s old", errBadSignature, age)
+	if age := now.Sub(ts); age > maxAge {
+		return fmt.Errorf("%w: message is %s old (limit %s)", errStaleMessage, age, maxAge)
 	}
 	if skew := ts.Sub(now); skew > maxMessageSkew {
-		return fmt.Errorf("%w: message is %s in the future", errBadSignature, skew)
+		return fmt.Errorf("%w: message is %s in the future", errStaleMessage, skew)
 	}
 
 	return nil

@@ -224,17 +224,36 @@ func buildAlert(body []byte) (alert.Alert, map[string]string, parseInfo, error) 
 		Details: details,
 		Source:  alert.SourceAzureMonitor,
 		Status:  status,
-		// alertId is the alert *instance* ID and is stable across the Fired and
-		// Resolved deliveries of one firing (Azure alerts are stateful), so this
-		// closes the alert it opened. Never use originAlertId: it is per-rule for
-		// metric alerts, so a single missed close would mute that rule forever.
-		Dedup: alert.NewUserDedup(sha256Hex(e.AlertID)),
+		Dedup:   alert.NewUserDedup(sha256Hex(dedupKey(e))),
 	}, buildMeta(e, ctx), info, nil
 }
 
-// alertSummary falls back through progressively weaker identifiers. Azure always
-// sends alertRule in practice, but an empty summary does not error -- it creates
-// a blank, unactionable alert -- so the fallback is a correctness requirement.
+// dedupKey returns the stable identity of one alert firing.
+//
+// alertId is the alert *instance* ID and is stable across the Fired and Resolved
+// deliveries of one firing (Azure alerts are stateful), so it closes the alert it
+// opened. Never use originAlertId: it is per-rule for metric alerts, so a single
+// missed close would mute that rule forever.
+//
+// When alertId is absent the weaker identifiers are combined instead. Hashing ""
+// would hand every such payload the same key, collapsing unrelated alerts onto a
+// single one that any one Resolved delivery could then close. Every field used
+// here is fixed for the life of a firing -- notably excluding resolvedDateTime,
+// which appears only on the Resolved delivery and would stop it matching the
+// Fired delivery it needs to close.
+func dedupKey(e essentials) string {
+	if e.AlertID != "" {
+		return e.AlertID
+	}
+
+	return strings.Join([]string{
+		e.AlertRuleID,
+		e.AlertRule,
+		strings.Join(e.ConfigurationItems, ","),
+		e.FiredDateTime,
+	}, "|")
+}
+
 // portalURL builds a generic Azure Portal deep link from a full ARM resource
 // ID. essentials.alertId is one:
 // /subscriptions/<sub>/providers/Microsoft.AlertsManagement/alerts/<guid>.
@@ -252,6 +271,9 @@ func portalURL(resourceID string) string {
 	return "https://portal.azure.com/#resource" + resourceID
 }
 
+// alertSummary falls back through progressively weaker identifiers. Azure always
+// sends alertRule in practice, but an empty summary does not error -- it creates
+// a blank, unactionable alert -- so the fallback is a correctness requirement.
 func alertSummary(e essentials) string {
 	if strings.TrimSpace(e.AlertRule) != "" {
 		return e.AlertRule

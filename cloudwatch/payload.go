@@ -150,13 +150,6 @@ func alarmDetails(al cloudWatchAlarm, region, topic string) string {
 	return strings.Join(lines, "\n")
 }
 
-// alarmConsoleURL builds a deep link to the alarm in the AWS console from its
-// ARN, e.g. arn:aws:cloudwatch:us-west-2:123456789012:alarm:AlarmName.
-//
-// Returns "" for anything that doesn't parse as a CloudWatch alarm ARN, rather
-// than a broken link -- ARN is attacker-influenced (it's a field in the signed
-// payload, but not otherwise validated), and malformed input must degrade
-// gracefully like every other field here.
 // parseAlarmARN extracts the region and alarm name from a CloudWatch alarm
 // ARN, e.g. arn:aws:cloudwatch:us-west-2:123456789012:alarm:AlarmName.
 func parseAlarmARN(arn string) (region, name string, ok bool) {
@@ -173,6 +166,13 @@ func parseAlarmARN(arn string) (region, name string, ok bool) {
 	return region, name, true
 }
 
+// alarmConsoleURL builds a deep link to the alarm in the AWS console from its
+// ARN, e.g. arn:aws:cloudwatch:us-west-2:123456789012:alarm:AlarmName.
+//
+// Returns "" for anything that doesn't parse as a CloudWatch alarm ARN, rather
+// than a broken link -- ARN is attacker-influenced (it's a field in the signed
+// payload, but not otherwise validated), and malformed input must degrade
+// gracefully like every other field here.
 func alarmConsoleURL(arn string) string {
 	region, name, ok := parseAlarmARN(arn)
 	if !ok {

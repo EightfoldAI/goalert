@@ -81,6 +81,24 @@ func TestSetAlertMetadata(t *testing.T) {
 		}, getMeta(alertID))
 	})
 
+	t.Run("an empty value is stored, not treated as a delete", func(t *testing.T) {
+		// Pins what the schema documents. There is no delete operation, so an empty
+		// value must round-trip as an empty string with the key still present --
+		// otherwise callers storing a legitimately empty value would lose the key.
+		res := h.GraphQLQuery2(fmt.Sprintf(`mutation{setAlertMetadata(input:{alertID:%d, meta:[{key:"jira_ticket", value:""}]})}`, alertID))
+		require.Empty(t, res.Errors)
+
+		meta := getMeta(alertID)
+		require.Contains(t, meta, "jira_ticket", "key must survive an empty value")
+		require.Equal(t, "", meta["jira_ticket"])
+		require.Equal(t, "cloudwatch-updated", meta["source"], "other keys must be untouched")
+
+		// Restore, so the closed-alert subtest below still asserts against a
+		// meaningful value.
+		res = h.GraphQLQuery2(fmt.Sprintf(`mutation{setAlertMetadata(input:{alertID:%d, meta:[{key:"jira_ticket", value:"CLOP-123"}]})}`, alertID))
+		require.Empty(t, res.Errors)
+	})
+
 	t.Run("rejected once the alert is closed", func(t *testing.T) {
 		res := h.GraphQLQuery2(fmt.Sprintf(`mutation{updateAlerts(input:{alertIDs:[%d], newStatus: StatusClosed}){id}}`, alertID))
 		require.Empty(t, res.Errors)

@@ -86,13 +86,13 @@ func TestVerifyMessage(t *testing.T) {
 	t.Run("v1 sha1 round trip", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "1")
-		assert.NoError(t, verifyMessage(testNow, &key.PublicKey, &e))
+		assert.NoError(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e))
 	})
 
 	t.Run("v2 sha256 round trip", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "2")
-		assert.NoError(t, verifyMessage(testNow, &key.PublicKey, &e))
+		assert.NoError(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e))
 	})
 
 	t.Run("subscription confirmation round trip", func(t *testing.T) {
@@ -101,27 +101,27 @@ func TestVerifyMessage(t *testing.T) {
 		e.SubscribeURL = "https://sns.us-west-2.amazonaws.com/?Action=ConfirmSubscription&Token=tok"
 		e.Token = "tok"
 		signEnvelope(t, key, &e, "1")
-		assert.NoError(t, verifyMessage(testNow, &key.PublicKey, &e))
+		assert.NoError(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e))
 	})
 
 	t.Run("wrong key rejected", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "1")
-		assert.ErrorIs(t, verifyMessage(testNow, &other.PublicKey, &e), errBadSignature)
+		assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &other.PublicKey, &e), errBadSignature)
 	})
 
 	t.Run("tampered message rejected", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "1")
 		e.Message = `{"AlarmName":"tampered","NewStateValue":"ALARM"}`
-		assert.ErrorIs(t, verifyMessage(testNow, &key.PublicKey, &e), errBadSignature)
+		assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e), errBadSignature)
 	})
 
 	t.Run("empty subject cannot forge absent subject", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "1") // signed with Subject absent
 		e.Subject = strPtr("")        // now present-but-empty
-		assert.ErrorIs(t, verifyMessage(testNow, &key.PublicKey, &e), errBadSignature)
+		assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e), errBadSignature)
 	})
 
 	t.Run("unknown signature version rejected", func(t *testing.T) {
@@ -130,35 +130,35 @@ func TestVerifyMessage(t *testing.T) {
 		// Must not silently fall back to SHA-1: a future version could change the
 		// canonical form.
 		e.SignatureVersion = "3"
-		assert.ErrorIs(t, verifyMessage(testNow, &key.PublicKey, &e), errBadSignature)
+		assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e), errBadSignature)
 	})
 
 	t.Run("empty signature version rejected", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "1")
 		e.SignatureVersion = ""
-		assert.ErrorIs(t, verifyMessage(testNow, &key.PublicKey, &e), errBadSignature)
+		assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e), errBadSignature)
 	})
 
 	t.Run("non base64 signature rejected", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "1")
 		e.Signature = "!!!not base64!!!"
-		assert.ErrorIs(t, verifyMessage(testNow, &key.PublicKey, &e), errBadSignature)
+		assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e), errBadSignature)
 	})
 
 	t.Run("empty signature rejected", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "1")
 		e.Signature = ""
-		assert.ErrorIs(t, verifyMessage(testNow, &key.PublicKey, &e), errBadSignature)
+		assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e), errBadSignature)
 	})
 
 	t.Run("unknown type rejected", func(t *testing.T) {
 		e := testEnvelope()
 		signEnvelope(t, key, &e, "1")
 		e.Type = "Bogus"
-		assert.ErrorIs(t, verifyMessage(testNow, &key.PublicKey, &e), errBadSignature)
+		assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e), errBadSignature)
 	})
 }
 
@@ -185,7 +185,7 @@ func TestVerifyMessage_Freshness(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			e := testEnvelope()
 			signEnvelope(t, key, &e, "1")
-			err := verifyMessage(tt.now, &key.PublicKey, &e)
+			err := verifyMessage(tt.now, defaultMaxMessageAge, &key.PublicKey, &e)
 			if tt.ok {
 				assert.NoError(t, err)
 				return
@@ -202,7 +202,7 @@ func TestVerifyMessage_UnparsableTimestamp(t *testing.T) {
 	e := testEnvelope()
 	e.Timestamp = "not a timestamp"
 	signEnvelope(t, key, &e, "1")
-	assert.ErrorIs(t, verifyMessage(testNow, &key.PublicKey, &e), errBadSignature)
+	assert.ErrorIs(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e), errBadSignature)
 }
 
 func TestVerifyMessage_RFC3339Timestamp(t *testing.T) {
@@ -212,7 +212,7 @@ func TestVerifyMessage_RFC3339Timestamp(t *testing.T) {
 	e := testEnvelope()
 	e.Timestamp = "2026-07-30T12:00:00Z"
 	signEnvelope(t, key, &e, "1")
-	assert.NoError(t, verifyMessage(testNow, &key.PublicKey, &e))
+	assert.NoError(t, verifyMessage(testNow, defaultMaxMessageAge, &key.PublicKey, &e))
 }
 
 func TestParseCertPublicKey(t *testing.T) {

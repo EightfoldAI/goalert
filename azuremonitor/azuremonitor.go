@@ -68,7 +68,7 @@ func (h *Handler) ServeIncoming(w http.ResponseWriter, r *http.Request) {
 	// as a confusing 400.
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	data, err := io.ReadAll(r.Body)
-	if errutil.HTTPError(ctx, w, err) {
+	if errutil.HTTPErrorRetry(ctx, w, err) {
 		return
 	}
 
@@ -121,7 +121,11 @@ func (h *Handler) ServeIncoming(w http.ResponseWriter, r *http.Request) {
 		retry.Limit(5),
 		retry.FibBackoff(250*time.Millisecond),
 	)
-	if errutil.HTTPError(ctx, w, err) {
+	// HTTPErrorRetry, not HTTPError: Azure's retryable set is 408, 429, 503 and 504
+	// -- 500 is absent, so mapping an exhausted database failure to 500 would drop
+	// the alert with no retries at all, which is exactly the case most worth
+	// retrying (an Aurora failover). 503 is retried by Azure and by SNS.
+	if errutil.HTTPErrorRetry(ctx, w, err) {
 		return
 	}
 
