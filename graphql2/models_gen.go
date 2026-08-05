@@ -103,6 +103,14 @@ type AlertsByStatus struct {
 	Closed  int `json:"closed"`
 }
 
+type AppendAlertDetailsInput struct {
+	AlertID int `json:"alertID"`
+	// Text appended to the alert's existing Details, separated by a blank line.
+	// The combined text is truncated to fit if it exceeds the details length
+	// limit.
+	Text string `json:"text"`
+}
+
 type AuthSubjectConnection struct {
 	Nodes    []user.AuthSubject `json:"nodes"`
 	PageInfo *PageInfo          `json:"pageInfo"`

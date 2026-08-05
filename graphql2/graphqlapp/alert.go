@@ -487,6 +487,46 @@ func (m *Mutation) SetAlertMetadata(ctx context.Context, input graphql2.SetAlert
 	return true, nil
 }
 
+// AppendAlertDetails appends text to an existing alert's Details, separated by
+// a blank line from whatever is already there.
+//
+// Unlike SetAlertMetadata this reads the current row via AlertStore.FindOne
+// rather than a merge-friendly key/value store: Details is free text with no
+// per-key structure, so preserving existing content means literally reading
+// it and appending. FindOne is not transaction-aware, so the read happens
+// before the write's transaction starts -- the same best-effort consistency
+// already accepted for SetAlertMetadata's read-then-write, not a new gap.
+func (m *Mutation) AppendAlertDetails(ctx context.Context, input graphql2.AppendAlertDetailsInput) (bool, error) {
+	current, err := m.AlertStore.FindOne(ctx, input.AlertID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// FindOne's bare sql.ErrNoRows is an implementation detail; a missing
+		// AlertID is a client input error, not a server fault -- translating it
+		// keeps it out of the error-level server logs (the smoke harness treats
+		// any error-level log line as a test failure) and gives the caller an
+		// actionable message instead of a raw SQL error string.
+		return false, validation.NewFieldError("AlertID", "not found")
+	}
+	if err != nil {
+		return false, err
+	}
+
+	details := current.Details
+	if details != "" {
+		details += "\n\n"
+	}
+	details += input.Text
+	details = validate.SanitizeText(details, alert.MaxDetailsLength)
+
+	err = withContextTx(ctx, m.DB, func(ctx context.Context, tx *sql.Tx) error {
+		return m.AlertStore.SetDetailsTx(ctx, tx, input.AlertID, details)
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 func (a *Alert) NoiseReason(ctx context.Context, raw *alert.Alert) (*string, error) {
 	am, err := (*App)(a).FindOneAlertFeedback(ctx, raw.ID)
 	if err != nil {

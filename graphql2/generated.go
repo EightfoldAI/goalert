@@ -461,6 +461,7 @@ type ComplexityRoot struct {
 
 	Mutation struct {
 		AddAuthSubject                     func(childComplexity int, input user.AuthSubject) int
+		AppendAlertDetails                 func(childComplexity int, input AppendAlertDetailsInput) int
 		ClearTemporarySchedules            func(childComplexity int, input ClearTemporarySchedulesInput) int
 		CloseMatchingAlert                 func(childComplexity int, input CloseMatchingAlertInput) int
 		CreateAlert                        func(childComplexity int, input CreateAlertInput) int
@@ -984,6 +985,7 @@ type MutationResolver interface {
 	CloseMatchingAlert(ctx context.Context, input CloseMatchingAlertInput) (bool, error)
 	SetAlertNoiseReason(ctx context.Context, input SetAlertNoiseReasonInput) (bool, error)
 	SetAlertMetadata(ctx context.Context, input SetAlertMetadataInput) (bool, error)
+	AppendAlertDetails(ctx context.Context, input AppendAlertDetailsInput) (bool, error)
 	CreateService(ctx context.Context, input CreateServiceInput) (*service.Service, error)
 	CreateEscalationPolicy(ctx context.Context, input CreateEscalationPolicyInput) (*escalation.Policy, error)
 	CreateEscalationPolicyStep(ctx context.Context, input CreateEscalationPolicyStepInput) (*escalation.Step, error)
@@ -2566,6 +2568,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.AddAuthSubject(childComplexity, args["input"].(user.AuthSubject)), true
+	case "Mutation.appendAlertDetails":
+		if e.ComplexityRoot.Mutation.AppendAlertDetails == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_appendAlertDetails_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.AppendAlertDetails(childComplexity, args["input"].(AppendAlertDetailsInput)), true
 	case "Mutation.clearTemporarySchedules":
 		if e.ComplexityRoot.Mutation.ClearTemporarySchedules == nil {
 			break
@@ -4937,6 +4950,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 		ec.unmarshalInputAlertMetricsOptions,
 		ec.unmarshalInputAlertRecentEventsOptions,
 		ec.unmarshalInputAlertSearchOptions,
+		ec.unmarshalInputAppendAlertDetailsInput,
 		ec.unmarshalInputAuthSubjectInput,
 		ec.unmarshalInputCalcRotationHandoffTimesInput,
 		ec.unmarshalInputClauseInput,
@@ -6675,6 +6689,20 @@ func (ec *executionContext) field_Mutation_addAuthSubject_args(ctx context.Conte
 	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "input",
 		func(ctx context.Context, v any) (user.AuthSubject, error) {
 			return ec.unmarshalNAuthSubjectInput2githubᚗcomᚋtargetᚋgoalertᚋuserᚐAuthSubject(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["input"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_appendAlertDetails_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "input",
+		func(ctx context.Context, v any) (AppendAlertDetailsInput, error) {
+			return ec.unmarshalNAppendAlertDetailsInput2githubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐAppendAlertDetailsInput(ctx, v)
 		})
 	if err != nil {
 		return nil, err
@@ -14800,6 +14828,50 @@ func (ec *executionContext) fieldContext_Mutation_setAlertMetadata(ctx context.C
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_setAlertMetadata_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_appendAlertDetails(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_appendAlertDetails(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().AppendAlertDetails(ctx, fc.Args["input"].(AppendAlertDetailsInput))
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_appendAlertDetails(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_appendAlertDetails_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -24957,6 +25029,43 @@ func (ec *executionContext) unmarshalInputAlertSearchOptions(ctx context.Context
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputAppendAlertDetailsInput(ctx context.Context, obj any) (AppendAlertDetailsInput, error) {
+	var it AppendAlertDetailsInput
+	if obj == nil {
+		return it, nil
+	}
+
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"alertID", "text"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "alertID":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("alertID"))
+			data, err := ec.unmarshalNInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.AlertID = data
+		case "text":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("text"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Text = data
+		}
+	}
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputAuthSubjectInput(ctx context.Context, obj any) (user.AuthSubject, error) {
 	var it user.AuthSubject
 	if obj == nil {
@@ -33525,6 +33634,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "appendAlertDetails":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_appendAlertDetails(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "createService":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_createService(ctx, field)
@@ -39615,6 +39731,11 @@ func (ec *executionContext) marshalNAlertsByStatus2ᚖgithubᚗcomᚋtargetᚋgo
 		return graphql.Null
 	}
 	return ec._AlertsByStatus(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalNAppendAlertDetailsInput2githubᚗcomᚋtargetᚋgoalertᚋgraphql2ᚐAppendAlertDetailsInput(ctx context.Context, v any) (AppendAlertDetailsInput, error) {
+	res, err := ec.unmarshalInputAppendAlertDetailsInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
 }
 
 func (ec *executionContext) marshalNAuthSubject2githubᚗcomᚋtargetᚋgoalertᚋuserᚐAuthSubject(ctx context.Context, sel ast.SelectionSet, v user.AuthSubject) graphql.Marshaler {

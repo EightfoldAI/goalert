@@ -70,6 +70,13 @@ type Mutation {
   """
   setAlertMetadata(input: SetAlertMetadataInput!): Boolean!
 
+  """
+  appendAlertDetails appends text to an existing alert's Details, separated
+  by a blank line from whatever is already there. Fails if the alert is
+  closed or does not exist.
+  """
+  appendAlertDetails(input: AppendAlertDetailsInput!): Boolean!
+
   createService(input: CreateServiceInput!): Service
   createEscalationPolicy(input: CreateEscalationPolicyInput!): EscalationPolicy
   createEscalationPolicyStep(

@@ -104,6 +104,18 @@ ON CONFLICT (alert_id)
     WHERE
         alert_data.alert_id = $1;
 
+-- name: Alert_SetDetails :execrows
+-- Sets the details for the alert.
+UPDATE
+    alerts
+SET
+    details = $2
+WHERE
+    id = $1
+    AND status != 'closed'
+    AND (service_id = $3
+        OR $3 IS NULL); -- ensure the alert is associated with the service, if coming from an integration
+
 -- name: Alert_ServiceEPHasSteps :one
 -- Returns true if the Escalation Policy for the provided service has at least one step.
 SELECT

@@ -432,6 +432,17 @@ input SetAlertMetadataInput {
   meta: [AlertMetadataInput!]!
 }
 
+input AppendAlertDetailsInput {
+  alertID: Int!
+
+  """
+  Text appended to the alert's existing Details, separated by a blank line.
+  The combined text is truncated to fit if it exceeds the details length
+  limit.
+  """
+  text: String!
+}
+
 input CreateAlertInput {
   summary: String!
   details: String

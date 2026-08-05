@@ -126,6 +126,11 @@ export interface AlertsByStatus {
   unacked: number
 }
 
+export interface AppendAlertDetailsInput {
+  alertID: number
+  text: string
+}
+
 export interface AuthSubject {
   providerID: string
   subjectID: string
@@ -762,6 +767,7 @@ export interface MessageStatusHistory {
 
 export interface Mutation {
   addAuthSubject: boolean
+  appendAlertDetails: boolean
   clearTemporarySchedules: boolean
   closeMatchingAlert: boolean
   createAlert?: null | Alert
