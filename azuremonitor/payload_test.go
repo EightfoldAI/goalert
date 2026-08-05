@@ -1,9 +1,11 @@
 package azuremonitor
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -882,4 +884,56 @@ func TestStringProps_StripsHTMLAndSkipsNonStrings(t *testing.T) {
 	assert.NotContains(t, a.Details, "<b>")
 	// Non-string values are skipped rather than dumped as raw JSON.
 	assert.NotContains(t, a.Details, `{"a"`)
+}
+
+// TestBuildAlert_ControlCharOnlyAlertRuleGetsFallback pins the same
+// sanitize-before-testing-emptiness bug fixed in cloudwatch's buildAlarm:
+// alertRule made only of non-printable control characters is non-blank under
+// TrimSpace (which only strips whitespace) but sanitizes to "". Testing the raw
+// value would let it through as the summary, only for the caller's sanitize pass
+// to reduce it to "" -- an empty Summary passes validate.Text silently, so the
+// alert would be created with no useful content instead of falling through to
+// the next candidate.
+func TestBuildAlert_ControlCharOnlyAlertRuleGetsFallback(t *testing.T) {
+	body, err := json.Marshal(map[string]any{
+		"schemaId": "azureMonitorCommonAlertSchema",
+		"data": map[string]any{
+			"essentials": map[string]any{
+				"alertRule":        "\x01\x02",
+				"monitorCondition": "Fired",
+				"signalType":       "Metric",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	a, _, _, err := buildAlert(body)
+	require.NoError(t, err)
+
+	assert.Equal(t, "Azure Monitor Metric alert", a.Summary)
+	assert.NotEmpty(t, a.Summary, "must never be blank: an empty Summary passes validate.Text silently")
+}
+
+// TestCleanMeta_StaysUnderByteBudget pins the fix for the byte-vs-rune gap:
+// maxMetaValueLen bounds each value in RUNES, but alert.ValidateMetadata sums
+// BYTES. buildMeta's dozen keys, each near that rune cap with multi-byte
+// content, add up to more bytes than the 32KiB total allows -- this test uses
+// enough keys to actually cross it, so a regression that drops the byte-budget
+// pass fails here regardless of buildMeta's current key count.
+func TestCleanMeta_StaysUnderByteBudget(t *testing.T) {
+	wide := strings.Repeat("😀", maxMetaValueLen) // 1024 runes, 4 bytes each
+
+	m := make(map[string]string, 20)
+	for i := 0; i < 20; i++ {
+		m[fmt.Sprintf("key_%d", i)] = wide
+	}
+
+	out := cleanMeta(m)
+
+	total := 0
+	for k, v := range out {
+		total += len(k) + len(v)
+		require.True(t, utf8.ValidString(v), "truncation must not split a rune")
+	}
+	assert.Less(t, total, 32*1024)
 }

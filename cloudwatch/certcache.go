@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -33,6 +35,10 @@ const (
 	maxCertBytes = 16 * 1024
 
 	certFetchTimeout = 5 * time.Second
+
+	// maxConcurrentCertFetches bounds how many outbound cert fetches may be in
+	// flight at once, across ALL urls -- see the fetchSem field doc.
+	maxConcurrentCertFetches = 8
 )
 
 // certCache maps a validated signing-cert URL to its RSA public key.
@@ -45,12 +51,17 @@ const (
 // order is sufficient and far simpler. Only a successfully parsed key is ever
 // inserted, so a URL that never yields one cannot evict a working entry.
 //
-// Failures are tracked separately and briefly. Without that, a key holder could
-// send a stream of distinct `https://sns.<region>.amazonaws.com/<random>.pem`
-// URLs, each one missing the cache and costing a real outbound fetch that holds a
-// request goroutine for up to certFetchTimeout. Nothing else rate-limits this
-// path: calllimiter.RoundTripper is a no-op unless a limiter is in the context,
-// and ingress does not install one.
+// Failures are tracked separately and briefly, so a REPEATED bad URL is not
+// refetched on every delivery. That alone does not bound a stream of DISTINCT
+// forged `.pem` URLs -- each one is a first-time miss on both the positive and
+// negative cache, and still costs a real outbound fetch. What actually bounds
+// that is fetchSem: a semaphore capping how many fetches, across ALL urls, may
+// be in flight at once, so a flood of distinct urls queues for a fetch slot
+// rather than spawning an unbounded goroutine (each holding a connection open
+// for up to certFetchTimeout) per request. fetchOnce additionally collapses
+// concurrent requests for the SAME url into a single fetch -- the common
+// legitimate case right after AWS rotates a cert, when many deliveries can
+// arrive before the first fetch populates the cache.
 type certCache struct {
 	mx    sync.Mutex
 	keys  map[string]*rsa.PublicKey
@@ -61,13 +72,17 @@ type certCache struct {
 
 	// now is a field so the TTL is testable without sleeping.
 	now func() time.Time
+
+	fetchSem  chan struct{}
+	fetchOnce singleflight.Group
 }
 
 func newCertCache() *certCache {
 	return &certCache{
-		keys:   make(map[string]*rsa.PublicKey, maxCachedCerts),
-		failed: make(map[string]time.Time, maxCachedCertFailures),
-		now:    time.Now,
+		keys:     make(map[string]*rsa.PublicKey, maxCachedCerts),
+		failed:   make(map[string]time.Time, maxCachedCertFailures),
+		now:      time.Now,
+		fetchSem: make(chan struct{}, maxConcurrentCertFetches),
 	}
 }
 
@@ -137,6 +152,30 @@ func (c *certCache) publicKey(ctx context.Context, hc *http.Client, dial func(*u
 		return nil, fmt.Errorf("cloudwatch: signing certificate %q failed recently", key)
 	}
 
+	// fetchOnce.Do collapses concurrent callers with the SAME key onto one fetch;
+	// the semaphore acquired inside bounds how many fetches for DISTINCT keys run
+	// at once. Together they are what the certCache doc comment describes -- see
+	// there for why the negative cache above is not enough on its own.
+	v, err, _ := c.fetchOnce.Do(key, func() (any, error) {
+		select {
+		case c.fetchSem <- struct{}{}:
+			defer func() { <-c.fetchSem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
+		return c.fetchAndParse(ctx, hc, dial, u, key)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return v.(*rsa.PublicKey), nil
+}
+
+// fetchAndParse does the actual outbound request and parse for publicKey, run
+// under fetchOnce so concurrent callers for the same key share one call.
+func (c *certCache) fetchAndParse(ctx context.Context, hc *http.Client, dial func(*url.URL) *url.URL, u *url.URL, key string) (*rsa.PublicKey, error) {
 	ctx, cancel := context.WithTimeout(ctx, certFetchTimeout)
 	defer cancel()
 

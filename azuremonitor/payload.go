@@ -40,9 +40,19 @@ const (
 	// maxDescriptionLen bounds essentials.description, which is rendered last.
 	maxDescriptionLen = 2048
 
-	// maxMetaValueLen keeps metadata inside alert.ValidateMetadata's total cap;
-	// values come straight from the payload.
+	// maxMetaValueLen is a first-pass bound on each value, in RUNES. It is not by
+	// itself sufficient to stay inside alert.ValidateMetadata's total cap, which
+	// sums BYTES: buildMeta populates up to a dozen keys, and a rune-heavy
+	// (multi-byte) value at this cap on several of them can still add up to more
+	// bytes than the total allows. cleanMeta enforces the real, byte-based budget
+	// as a second pass.
 	maxMetaValueLen = 1024
+
+	// maxMetaTotalBytes leaves headroom under alert.ValidateMetadata's 32768-byte
+	// cap for the metadata keys themselves -- short ASCII constants, but sized off
+	// as a margin rather than their exact total so this doesn't need updating
+	// every time a key is added to buildMeta.
+	maxMetaTotalBytes = 32000
 )
 
 // envelope is the Azure Monitor common alert schema.
@@ -275,14 +285,23 @@ func portalURL(resourceID string) string {
 // sends alertRule in practice, but an empty summary does not error -- it creates
 // a blank, unactionable alert -- so the fallback is a correctness requirement.
 func alertSummary(e essentials) string {
-	if strings.TrimSpace(e.AlertRule) != "" {
-		return e.AlertRule
+	// Each candidate is sanitized before the emptiness test, not TrimSpace: the
+	// caller re-sanitizes the return value anyway, but SanitizeText also strips
+	// non-printable control characters that TrimSpace leaves alone. Testing the
+	// raw value would let e.g. AlertRule == "\x01\x02" through as non-blank, only
+	// for the caller's sanitize pass to reduce it to "". That does NOT fail
+	// validation -- validate.Text treats an empty body as valid regardless of its
+	// minimum length -- so the remaining fallbacks would be silently skipped and
+	// the alert created with a blank Summary: real, but useless to whoever is
+	// paged.
+	if rule := validate.SanitizeText(e.AlertRule, alert.MaxSummaryLength); rule != "" {
+		return rule
 	}
 	if items := nonEmpty(e.ConfigurationItems); len(items) > 0 {
 		return "Azure Monitor alert on " + strings.Join(items, ", ")
 	}
-	if strings.TrimSpace(e.SignalType) != "" {
-		return "Azure Monitor " + e.SignalType + " alert"
+	if signal := validate.SanitizeText(e.SignalType, alert.MaxSummaryLength); signal != "" {
+		return "Azure Monitor " + signal + " alert"
 	}
 	return "Azure Monitor alert"
 }
@@ -653,16 +672,44 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// cleanMeta drops empty values and bounds the rest. Values are not sanitized:
-// they are JSON-marshalled on write, so control characters are escaped rather
-// than injected, and trimming would corrupt an ARM resource ID.
+// cleanMeta drops empty values and bounds the rest so the map can never fail
+// alert.ValidateMetadata's total-size check. Values are not sanitized: they are
+// JSON-marshalled on write, so control characters are escaped rather than
+// injected, and trimming would corrupt an ARM resource ID.
+//
+// The per-value rune cap alone is not enough: it bounds runes, but
+// ValidateMetadata sums bytes, and enough multi-byte values at that cap can add
+// up to more bytes than the total allows. The byte budget below is computed from
+// however many keys are actually non-empty, rather than hardcoded to today's key
+// count, so the total still fits if buildMeta gains another key later.
 func cleanMeta(m map[string]string) map[string]string {
 	for k, v := range m {
 		if v == "" {
 			delete(m, k)
-			continue
 		}
-		m[k] = truncRunes(v, maxMetaValueLen)
+	}
+
+	perValueBudget := maxMetaTotalBytes
+	if n := len(m); n > 0 {
+		perValueBudget = maxMetaTotalBytes / n
+	}
+
+	for k, v := range m {
+		v = truncRunes(v, maxMetaValueLen)
+		m[k] = truncBytes(v, perValueBudget)
 	}
 	return m
+}
+
+// truncBytes truncates s to at most n bytes without splitting a UTF-8 rune's
+// encoding -- a plain byte-slice cut can leave a trailing partial rune, which
+// ToValidUTF8 then scrubs rather than emit invalid UTF-8 into the metadata.
+func truncBytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "")
 }

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -200,4 +201,86 @@ func TestCertCache_RejectsBadURLBeforeFetch(t *testing.T) {
 		"https://sns.us-west-2.amazonaws.com.evil.com/x.pem")
 	require.Error(t, err)
 	assert.EqualValues(t, 0, hits.Load(), "a disallowed host must not be fetched")
+}
+
+// TestCertCache_BoundsConcurrentFetchesAcrossDistinctURLs is the test the
+// certCache doc comment promises: the negative cache alone does nothing for a
+// flood of DISTINCT urls (each is a first-time miss), so this walks 100 of them
+// concurrently and asserts the server never sees more than
+// maxConcurrentCertFetches requests in flight at once -- proving fetchSem, not
+// the negative cache, is what bounds that case.
+func TestCertCache_BoundsConcurrentFetchesAcrossDistinctURLs(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pemData := selfSignedPEM(t, key)
+
+	var (
+		inFlight, maxInFlight atomic.Int32
+		hits                  atomic.Int32
+	)
+	dial, _ := certServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			old := maxInFlight.Load()
+			if n <= old || maxInFlight.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		// Hold the request open briefly so concurrent callers actually overlap;
+		// without this every request could complete before the next one starts.
+		time.Sleep(20 * time.Millisecond)
+		_, _ = w.Write(pemData)
+	})
+
+	c := newCertCache()
+	const nURLs = 100
+
+	var wg sync.WaitGroup
+	for i := 0; i < nURLs; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := c.publicKey(context.Background(), &http.Client{}, dial, certURL(fmt.Sprintf("distinct-%d", i)))
+			assert.NoError(t, err)
+		}(i)
+	}
+	wg.Wait()
+
+	assert.EqualValues(t, nURLs, hits.Load(), "every distinct url is still fetched eventually")
+	assert.LessOrEqual(t, maxInFlight.Load(), int32(maxConcurrentCertFetches),
+		"concurrent fetches across distinct urls must be bounded by fetchSem")
+}
+
+// TestCertCache_SingleflightDedupesSameURL covers the case fetchOnce exists for:
+// many deliveries racing to fetch the SAME url right after a cert rotation, none
+// of which have populated the cache yet.
+func TestCertCache_SingleflightDedupesSameURL(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pemData := selfSignedPEM(t, key)
+
+	dial, hits := certServer(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		_, _ = w.Write(pemData)
+	})
+
+	c := newCertCache()
+	u := certURL("rotated")
+
+	const nCallers = 20
+	var wg sync.WaitGroup
+	for i := 0; i < nCallers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pub, err := c.publicKey(context.Background(), &http.Client{}, dial, u)
+			assert.NoError(t, err)
+			assert.Equal(t, key.N, pub.N)
+		}()
+	}
+	wg.Wait()
+
+	assert.EqualValues(t, 1, hits.Load(), "concurrent callers for the same url must share one fetch")
 }

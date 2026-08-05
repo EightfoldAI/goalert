@@ -104,6 +104,21 @@ ON CONFLICT (alert_id)
     WHERE
         alert_data.alert_id = $1;
 
+-- name: Alert_LockOneAlertMetadata :one
+-- Locks the alert's row for a metadata read-modify-write, so two concurrent
+-- writers cannot both read the same starting document and one silently
+-- overwrite the other. Locks alerts, not alert_data: alert_data has no row
+-- before an alert's first metadata write, and FOR UPDATE against a table with
+-- no matching row locks nothing, so it could not serialize the first-writer
+-- case, which is the common one for a brand new alert.
+SELECT
+    id
+FROM
+    alerts
+WHERE
+    id = $1
+FOR UPDATE;
+
 -- name: Alert_LockOneAlertDetails :one
 -- Returns the details for the alert and locks its row, so that a read-modify-write
 -- of details cannot interleave with a concurrent one.

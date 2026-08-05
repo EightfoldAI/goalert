@@ -695,6 +695,29 @@ func (q *Queries) Alert_LockOneAlertDetails(ctx context.Context, arg Alert_LockO
 	return details, err
 }
 
+const alert_LockOneAlertMetadata = `-- name: Alert_LockOneAlertMetadata :one
+SELECT
+    id
+FROM
+    alerts
+WHERE
+    id = $1
+FOR UPDATE
+`
+
+// Locks the alert's row for a metadata read-modify-write, so two concurrent
+// writers cannot both read the same starting document and one silently
+// overwrite the other. Locks alerts, not alert_data: alert_data has no row
+// before an alert's first metadata write, and FOR UPDATE against a table with
+// no matching row locks nothing, so it could not serialize the first-writer
+// case, which is the common one for a brand new alert.
+func (q *Queries) Alert_LockOneAlertMetadata(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, alert_LockOneAlertMetadata, id)
+	var id_2 int64
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const alert_LockOneAlertService = `-- name: Alert_LockOneAlertService :one
 SELECT
     maintenance_expires_at NOTNULL::bool AS is_maint_mode,

@@ -87,13 +87,17 @@ func httpError(ctx context.Context, w http.ResponseWriter, err error, unexpected
 		// even in the worst case scenario.
 		http.Error(w, "Too many concurrent requests for this key or session", http.StatusTooManyRequests)
 	case errors.Is(err, ctxlock.ErrTimeout):
-		// Similar to above, but that we timed out waiting in the queue. This is
-		// back-pressure, not a slow client: 408 means the *client* failed to send a
-		// complete request in time (RFC 9110 15.5.9), which is the opposite of what
-		// happened, and webhook senders treat the two very differently -- Amazon SNS
-		// retries 429 and all 5xx but considers 408 a permanent failure, so a 408
-		// here silently discards the delivery instead of backing off.
-		http.Error(w, "Too many concurrent requests for this key or session", http.StatusTooManyRequests)
+		// Same status as ErrQueueFull above -- this is back-pressure, not a slow
+		// client, so 408 is wrong: it means the *client* failed to send a complete
+		// request in time (RFC 9110 15.5.9), the opposite of what happened, and
+		// webhook senders treat the two very differently -- Amazon SNS retries 429
+		// and all 5xx but treats 408 as a permanent failure, so 408 here silently
+		// discards the delivery instead of backing off. This is an intentional,
+		// application-wide change to every HTTPError caller, not scoped to ingress;
+		// the body text differs from ErrQueueFull's so a client can still tell
+		// "rejected immediately, queue full" from "waited and timed out" even
+		// though the status code is now the same for both.
+		http.Error(w, "Too many concurrent requests for this key or session; timed out waiting", http.StatusTooManyRequests)
 	case isCancel(err):
 		// Client disconnected, send 499 back so logs reflect that this
 		// was a client-side problem.

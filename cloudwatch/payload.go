@@ -19,10 +19,20 @@ const (
 	// runbook URL -- past MaxDetailsLength and it gets truncated away.
 	maxReasonLen = 2048
 
-	// maxMetaValueLen keeps metadata well inside alert.ValidateMetadata's total
-	// cap. Values come straight from the payload, and exceeding the cap is a
-	// client error, which SNS would retry forever.
+	// maxMetaValueLen is a first-pass bound on each value, in RUNES. Values come
+	// straight from the payload, and exceeding alert.ValidateMetadata's total cap
+	// is a client error, which SNS would retry forever. This alone is not
+	// sufficient to guarantee staying under that cap, which sums BYTES: with
+	// today's 7 keys, 7*1024 4-byte runes would be ~28KiB, under the 32KiB limit,
+	// but only arithmetically -- it breaks the moment another key is added.
+	// cleanMeta enforces the real, byte-based budget as a second pass.
 	maxMetaValueLen = 1024
+
+	// maxMetaTotalBytes leaves headroom under alert.ValidateMetadata's 32768-byte
+	// cap for the metadata keys themselves -- short ASCII constants, but sized off
+	// as a margin rather than their exact total so this doesn't need updating
+	// every time a key is added to alarmMeta.
+	maxMetaTotalBytes = 32000
 )
 
 // cloudWatchAlarm is the subset of a CloudWatch alarm notification we map.
@@ -98,10 +108,15 @@ func buildAlarm(al cloudWatchAlarm, region, topic string) (alert.Alert, map[stri
 		return alert.Alert{}, nil, false
 	}
 
-	// Test blank rather than empty: a whitespace-only AlarmName sanitizes to ""
-	// and would otherwise produce a blank, unactionable summary.
+	// Sanitize before testing emptiness, not TrimSpace: SanitizeText also strips
+	// non-printable control characters, which TrimSpace leaves alone. Testing the
+	// raw value would let e.g. AlarmName == "\x01\x02" through as non-blank, only
+	// for SanitizeText to reduce it to "" a few lines down. That does NOT fail
+	// validation -- validate.Text treats an empty body as valid regardless of its
+	// minimum length -- so the fallback would be silently skipped and the alert
+	// created with a blank Summary: real, but useless to whoever is paged.
 	name := al.AlarmName
-	if strings.TrimSpace(name) == "" {
+	if sanitizeSummary(name) == "" {
 		name = "unnamed alarm on " + topic
 	}
 
@@ -263,16 +278,44 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// cleanMeta drops empty values and bounds the rest. Values are not sanitized:
-// they are JSON-marshalled on write, so control characters are escaped rather
-// than injected, and trimming would corrupt an ARN.
+// cleanMeta drops empty values and bounds the rest so the map can never fail
+// alert.ValidateMetadata's total-size check. Values are not sanitized: they are
+// JSON-marshalled on write, so control characters are escaped rather than
+// injected, and trimming would corrupt an ARN.
+//
+// The per-value rune cap alone is not enough: it bounds runes, but
+// ValidateMetadata sums bytes, and enough multi-byte values at that cap can add
+// up to more bytes than the total allows. The byte budget below is computed from
+// however many keys are actually non-empty, rather than hardcoded to today's key
+// count, so the total still fits if alarmMeta gains another key later.
 func cleanMeta(m map[string]string) map[string]string {
 	for k, v := range m {
 		if v == "" {
 			delete(m, k)
-			continue
 		}
-		m[k] = truncRunes(v, maxMetaValueLen)
+	}
+
+	perValueBudget := maxMetaTotalBytes
+	if n := len(m); n > 0 {
+		perValueBudget = maxMetaTotalBytes / n
+	}
+
+	for k, v := range m {
+		v = truncRunes(v, maxMetaValueLen)
+		m[k] = truncBytes(v, perValueBudget)
 	}
 	return m
+}
+
+// truncBytes truncates s to at most n bytes without splitting a UTF-8 rune's
+// encoding -- a plain byte-slice cut can leave a trailing partial rune, which
+// ToValidUTF8 then scrubs rather than emit invalid UTF-8 into the metadata.
+func truncBytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "")
 }

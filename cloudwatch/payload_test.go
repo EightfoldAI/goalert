@@ -1,8 +1,11 @@
 package cloudwatch
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -333,6 +336,27 @@ func TestBuildAlert_CloudWatch(t *testing.T) {
 		assert.Equal(t, sha256Hex("unnamed alarm on PagerDuty-Data"), a.Dedup.Payload)
 	})
 
+	// AlarmName made only of non-printable control characters is non-blank under
+	// TrimSpace (which only strips whitespace) but sanitizes to "" -- the gate
+	// must test the sanitized value or this slips through as a blank summary
+	// instead of getting the fallback.
+	t.Run("control-character-only alarm name gets the fallback", func(t *testing.T) {
+		// json.Marshal, not a raw literal, so the control bytes are correctly
+		// JSON-escaped rather than producing invalid JSON that falls through to the
+		// raw-notification branch instead of exercising buildAlarm at all.
+		msg, err := json.Marshal(map[string]string{
+			"AlarmName":     "\x01\x02",
+			"NewStateValue": "ALARM",
+		})
+		require.NoError(t, err)
+
+		a, _, ok := buildAlert(notification(string(msg)))
+		require.True(t, ok)
+
+		assert.Equal(t, "unnamed alarm on PagerDuty-Data", a.Summary)
+		assert.NotEmpty(t, a.Summary, "must never be blank: an empty Summary passes validate.Text silently")
+	})
+
 	// encoding/json fills what it can, so one wrong-typed field must not cost us
 	// the CloudWatch branch and its dedup contract.
 	t.Run("wrong typed field still maps as an alarm", func(t *testing.T) {
@@ -543,4 +567,29 @@ func TestNormalizeSummaryQuirks(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "a b", n.Summary)
 	})
+}
+
+// TestCleanMeta_StaysUnderByteBudget pins the fix for the byte-vs-rune gap: the
+// per-value cap (maxMetaValueLen) bounds RUNES, but alert.ValidateMetadata sums
+// BYTES, so multi-byte values at that cap can add up to more bytes than the
+// 32KiB total allows. cloudwatch's own 7 keys stay under the limit today only by
+// arithmetic coincidence (7 * 1024 runes * 4 bytes/rune < 32KiB); this test uses
+// enough keys to actually cross it, so a regression that drops the byte-budget
+// pass fails here regardless of alarmMeta's current key count.
+func TestCleanMeta_StaysUnderByteBudget(t *testing.T) {
+	wide := strings.Repeat("😀", maxMetaValueLen) // 1024 runes, 4 bytes each
+
+	m := make(map[string]string, 20)
+	for i := 0; i < 20; i++ {
+		m[fmt.Sprintf("key_%d", i)] = wide
+	}
+
+	out := cleanMeta(m)
+
+	total := 0
+	for k, v := range out {
+		total += len(k) + len(v)
+		require.True(t, utf8.ValidString(v), "truncation must not split a rune")
+	}
+	assert.Less(t, total, 32*1024)
 }
