@@ -38,8 +38,46 @@ Account: 123456789012
 Metric: Eightfold/DP/WriteErrors
 Topic: PagerDuty-Data
 Alarm ARN: arn:aws:cloudwatch:us-west-2:123456789012:alarm:x
+Console: https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/x
 
 Runbook: https://runbook.example.com/dp/ats-write-errors`
+
+func TestAlarmConsoleURL(t *testing.T) {
+	tests := []struct{ name, arn, want string }{
+		{
+			name: "well-formed arn",
+			arn:  "arn:aws:cloudwatch:us-west-2:123456789012:alarm:x",
+			want: "https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/x",
+		},
+		{
+			// Spaces/brackets are common in real alarm names and must be
+			// percent-encoded, not "+"-encoded -- the console's SPA decodes the
+			// fragment with decodeURIComponent, which does not treat "+" as a space.
+			name: "name with spaces and brackets is percent-encoded",
+			arn:  "arn:aws:cloudwatch:us-west-2:123456789012:alarm:[us-west-2] Too Many Write Errors",
+			want: "https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/%5Bus-west-2%5D%20Too%20Many%20Write%20Errors",
+		},
+		{
+			// PathEscape leaves ":" unescaped -- it's valid unencoded in a URL
+			// path segment per RFC 3986 -- so this also confirms SplitN(...,7)
+			// kept the whole name (including its colon) rather than truncating it.
+			name: "name containing a literal colon stays whole",
+			arn:  "arn:aws:cloudwatch:us-west-2:123456789012:alarm:svc:sub-alarm",
+			want: "https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/svc:sub-alarm",
+		},
+		{name: "empty", arn: ""},
+		{name: "short arn does not panic", arn: "arn:aws:cloudwatch"},
+		{name: "wrong service", arn: "arn:aws:sns:us-west-2:123456789012:alarm:x"},
+		{name: "wrong resource type", arn: "arn:aws:cloudwatch:us-west-2:123456789012:topic:x"},
+		{name: "not an arn at all", arn: "not-an-arn"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, alarmConsoleURL(tt.arn))
+		})
+	}
+}
 
 func notification(message string) envelope {
 	return envelope{Type: typeNotification, TopicARN: testTopicARN, Message: message}
@@ -148,7 +186,7 @@ func TestBuildAlert_CloudWatch(t *testing.T) {
 		a, _, ok := buildAlert(notification(body))
 		require.True(t, ok)
 
-		assert.True(t, strings.HasSuffix(a.Details, "Alarm ARN: arn:aws:cloudwatch:us-west-2:123456789012:alarm:x"), a.Details)
+		assert.True(t, strings.HasSuffix(a.Details, "Console: https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/x"), a.Details)
 		assert.NotContains(t, a.Details, testRunbook)
 	})
 

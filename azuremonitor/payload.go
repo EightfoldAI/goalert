@@ -235,6 +235,23 @@ func buildAlert(body []byte) (alert.Alert, map[string]string, parseInfo, error) 
 // alertSummary falls back through progressively weaker identifiers. Azure always
 // sends alertRule in practice, but an empty summary does not error -- it creates
 // a blank, unactionable alert -- so the fallback is a correctness requirement.
+// portalURL builds a generic Azure Portal deep link from a full ARM resource
+// ID. essentials.alertId is one:
+// /subscriptions/<sub>/providers/Microsoft.AlertsManagement/alerts/<guid>.
+//
+// This is the generic "view any resource by its ID" portal pattern, not a
+// dedicated Azure Monitor alert-details page -- unlike the CloudWatch console
+// link, a specific alert-details blade route could not be confirmed against
+// current Microsoft documentation, so treat this as a best-effort fallback for
+// when essentials.investigationLink (Microsoft's own field for this) is
+// absent. Verify against a real fired alert before relying on it.
+func portalURL(resourceID string) string {
+	if !strings.HasPrefix(resourceID, "/subscriptions/") {
+		return ""
+	}
+	return "https://portal.azure.com/#resource" + resourceID
+}
+
 func alertSummary(e essentials) string {
 	if strings.TrimSpace(e.AlertRule) != "" {
 		return e.AlertRule
@@ -275,7 +292,15 @@ func alertDetails(e essentials, ctx alertContext, ctxLines []string, custom map[
 	}
 	add("Resource group", e.TargetResourceGroup)
 	add("Resource type", e.TargetResourceType)
-	add("Investigate", e.InvestigationLink)
+	if e.InvestigationLink != "" {
+		add("Investigate", e.InvestigationLink)
+	} else {
+		// investigationLink is Microsoft's own field for this and requires
+		// "limited preview registration" per their docs, so it is frequently
+		// absent. Fall back to a generic portal deep link built from alertId,
+		// which is always a full ARM resource ID.
+		add("Portal", portalURL(e.AlertID))
+	}
 
 	if len(ctxLines) > 0 {
 		lines = append(lines, "")

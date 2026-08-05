@@ -488,6 +488,50 @@ func TestBuildAlert_EssentialsExtras(t *testing.T) {
 	assert.Contains(t, meta["alert_rule_id"], "metricAlerts/rule")
 }
 
+func TestPortalURL(t *testing.T) {
+	tests := []struct{ name, resourceID, want string }{
+		{
+			name:       "valid arm resource id",
+			resourceID: testAlertID,
+			want:       "https://portal.azure.com/#resource" + testAlertID,
+		},
+		{name: "empty"},
+		{name: "not a resource id", resourceID: "not-a-resource-id"},
+		{name: "relative path missing leading slash", resourceID: "subscriptions/sub-1/providers/x"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, portalURL(tt.resourceID))
+		})
+	}
+}
+
+// investigationLink requires "limited preview registration" per Microsoft's
+// docs, so it is frequently absent -- this is the common case, not the edge
+// case, and must still leave the alert with a working link back to Azure.
+func TestBuildAlert_PortalFallback(t *testing.T) {
+	t.Run("falls back to the generic portal link when investigationLink is absent", func(t *testing.T) {
+		a, _, _, err := buildAlert([]byte(metricPayload("Fired")))
+		require.NoError(t, err)
+
+		assert.Contains(t, a.Details, "Portal: https://portal.azure.com/#resource"+testAlertID)
+		assert.NotContains(t, a.Details, "Investigate:")
+	})
+
+	t.Run("investigationLink wins when present, no duplicate link line", func(t *testing.T) {
+		body := strings.Replace(metricPayload("Fired"),
+			`"description": "Runbook: `+testRunbook+`"`,
+			`"description": "Runbook: `+testRunbook+`", "investigationLink": "https://portal.azure.com/investigate/abc"`, 1)
+
+		a, _, _, err := buildAlert([]byte(body))
+		require.NoError(t, err)
+
+		assert.Contains(t, a.Details, "Investigate: https://portal.azure.com/investigate/abc")
+		assert.NotContains(t, a.Details, "Portal:")
+	})
+}
+
 // Azure Managed Prometheus rule groups route to PagerDuty in this tenant (three
 // "Azure Pod Health Degraded" groups). The shape has no conditionType and no
 // condition.allOf, so before the dedicated branch it rendered essentials only.

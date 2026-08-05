@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/target/goalert/alert"
@@ -128,6 +130,7 @@ func alarmDetails(al cloudWatchAlarm, region, topic string) string {
 	}
 	add("Topic", topic)
 	add("Alarm ARN", al.AlarmARN)
+	add("Console", alarmConsoleURL(al.AlarmARN))
 
 	if al.AlarmDescription != "" {
 		// Blank line, then the description verbatim: it carries the runbook URL.
@@ -135,6 +138,35 @@ func alarmDetails(al cloudWatchAlarm, region, topic string) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// alarmConsoleURL builds a deep link to the alarm in the AWS console from its
+// ARN, e.g. arn:aws:cloudwatch:us-west-2:123456789012:alarm:AlarmName.
+//
+// Returns "" for anything that doesn't parse as a CloudWatch alarm ARN, rather
+// than a broken link -- ARN is attacker-influenced (it's a field in the signed
+// payload, but not otherwise validated), and malformed input must degrade
+// gracefully like every other field here.
+func alarmConsoleURL(arn string) string {
+	// arn:aws:cloudwatch:<region>:<account>:alarm:<name> -- SplitN(...,7) so a
+	// name containing a literal colon (unusual, but not disallowed) stays whole
+	// in the last segment rather than being truncated.
+	parts := strings.SplitN(arn, ":", 7)
+	if len(parts) != 7 || parts[0] != "arn" || parts[2] != "cloudwatch" || parts[5] != "alarm" {
+		return ""
+	}
+	region, name := parts[3], parts[6]
+	if region == "" || name == "" {
+		return ""
+	}
+
+	// PathEscape, not QueryEscape: this is a URL fragment that the console's own
+	// JS decodes with decodeURIComponent, which does NOT treat "+" as a space --
+	// QueryEscape's "+" for spaces would silently mangle any alarm name
+	// containing one, and real alarm names commonly do (e.g. "[us-west-2] Too
+	// Many Write Errors").
+	return fmt.Sprintf("https://%s.console.aws.amazon.com/cloudwatch/home?region=%s#alarmsV2:alarm/%s",
+		region, region, url.PathEscape(name))
 }
 
 func alarmMeta(al cloudWatchAlarm, region, topic string) map[string]string {
