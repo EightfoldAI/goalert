@@ -16,6 +16,9 @@ const (
 	testAlertID   = "/subscriptions/sub-1/providers/Microsoft.AlertsManagement/alerts/1db044ff-df8f-4064-a559-b9c9f5f4f000"
 	testServiceID = "3c1a1a44-8e7a-4d1b-9f4a-2b0e5c6d7f80"
 	testRunbook   = "https://runbook.example.com/frontdoor"
+
+	testPortalURL = "https://portal.azure.com/#blade/Microsoft_Azure_Monitoring/AlertDetailsTemplateBlade/alertId/" +
+		"%2Fsubscriptions%2Fsub-1%2Fproviders%2FMicrosoft.AlertsManagement%2Falerts%2F1db044ff-df8f-4064-a559-b9c9f5f4f000"
 )
 
 // metricPayload is a SingleResourceMultipleMetricCriteria delivery.
@@ -495,7 +498,7 @@ func TestPortalURL(t *testing.T) {
 		{
 			name:       "valid arm resource id",
 			resourceID: testAlertID,
-			want:       "https://portal.azure.com/#resource" + testAlertID,
+			want:       testPortalURL,
 		},
 		{name: "empty"},
 		{name: "not a resource id", resourceID: "not-a-resource-id"},
@@ -507,21 +510,27 @@ func TestPortalURL(t *testing.T) {
 			assert.Equal(t, tt.want, portalURL(tt.resourceID))
 		})
 	}
+
+	// The ID is one path segment, so its slashes must not survive as separators.
+	t.Run("percent-encodes the alert id", func(t *testing.T) {
+		got := portalURL(testAlertID)
+		assert.Contains(t, got, "%2Fsubscriptions%2Fsub-1%2F")
+		assert.NotContains(t, strings.TrimPrefix(got, "https://portal.azure.com/#blade/Microsoft_Azure_Monitoring/AlertDetailsTemplateBlade/alertId/"), "/")
+	})
 }
 
-// investigationLink requires "limited preview registration" per Microsoft's
-// docs, so it is frequently absent -- this is the common case, not the edge
-// case, and must still leave the alert with a working link back to Azure.
-func TestBuildAlert_PortalFallback(t *testing.T) {
-	t.Run("falls back to the generic portal link when investigationLink is absent", func(t *testing.T) {
+// investigationLink opens Azure's AI investigation agent, not the alert, so it
+// is additive: the portal link to the alert itself must always be present.
+func TestBuildAlert_PortalLink(t *testing.T) {
+	t.Run("portal link is present when investigationLink is absent", func(t *testing.T) {
 		a, _, _, err := buildAlert([]byte(metricPayload("Fired")))
 		require.NoError(t, err)
 
-		assert.Contains(t, a.Details, "Portal: https://portal.azure.com/#resource"+testAlertID)
+		assert.Contains(t, a.Details, "Portal: "+testPortalURL)
 		assert.NotContains(t, a.Details, "Investigate:")
 	})
 
-	t.Run("investigationLink wins when present, no duplicate link line", func(t *testing.T) {
+	t.Run("investigationLink supplements the portal link, never replaces it", func(t *testing.T) {
 		body := strings.Replace(metricPayload("Fired"),
 			`"description": "Runbook: `+testRunbook+`"`,
 			`"description": "Runbook: `+testRunbook+`", "investigationLink": "https://portal.azure.com/investigate/abc"`, 1)
@@ -529,8 +538,8 @@ func TestBuildAlert_PortalFallback(t *testing.T) {
 		a, _, _, err := buildAlert([]byte(body))
 		require.NoError(t, err)
 
+		assert.Contains(t, a.Details, "Portal: "+testPortalURL)
 		assert.Contains(t, a.Details, "Investigate: https://portal.azure.com/investigate/abc")
-		assert.NotContains(t, a.Details, "Portal:")
 	})
 }
 

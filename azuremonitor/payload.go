@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -89,8 +90,9 @@ type essentials struct {
 	TargetResourceGroup string `json:"targetResourceGroup"`
 	TargetResourceType  string `json:"targetResourceType"`
 
-	// InvestigationLink opens the alert in Azure Monitor. Not present on every
-	// payload, but a direct actionable link when it is.
+	// InvestigationLink opens Azure Monitor's AI investigation experience
+	// (Observability Agent) for the alert -- NOT the alert itself. It is a
+	// supplement to the portal link, never a replacement for it.
 	InvestigationLink string `json:"investigationLink"`
 }
 
@@ -264,21 +266,21 @@ func dedupKey(e essentials) string {
 	}, "|")
 }
 
-// portalURL builds a generic Azure Portal deep link from a full ARM resource
-// ID. essentials.alertId is one:
+// portalURL builds an Azure Portal deep link to the alert-details page from a
+// full ARM alert ID. essentials.alertId is one:
 // /subscriptions/<sub>/providers/Microsoft.AlertsManagement/alerts/<guid>.
 //
-// This is the generic "view any resource by its ID" portal pattern, not a
-// dedicated Azure Monitor alert-details page -- unlike the CloudWatch console
-// link, a specific alert-details blade route could not be confirmed against
-// current Microsoft documentation, so treat this as a best-effort fallback for
-// when essentials.investigationLink (Microsoft's own field for this) is
-// absent. Verify against a real fired alert before relying on it.
-func portalURL(resourceID string) string {
-	if !strings.HasPrefix(resourceID, "/subscriptions/") {
+// The generic "#resource/<id>" pattern does NOT work here: Microsoft.AlertsManagement
+// alerts have no resource blade, so the portal cannot render one and drops the
+// user on a default view. AlertDetailsTemplateBlade is the route that resolves,
+// and the ID must be percent-encoded because it is carried as a single path
+// segment.
+func portalURL(alertID string) string {
+	if !strings.HasPrefix(alertID, "/subscriptions/") {
 		return ""
 	}
-	return "https://portal.azure.com/#resource" + resourceID
+	return "https://portal.azure.com/#blade/Microsoft_Azure_Monitoring/AlertDetailsTemplateBlade/alertId/" +
+		url.PathEscape(alertID)
 }
 
 // alertSummary falls back through progressively weaker identifiers. Azure always
@@ -333,15 +335,11 @@ func alertDetails(e essentials, ctx alertContext, ctxLines []string, custom map[
 	}
 	add("Resource group", e.TargetResourceGroup)
 	add("Resource type", e.TargetResourceType)
-	if e.InvestigationLink != "" {
-		add("Investigate", e.InvestigationLink)
-	} else {
-		// investigationLink is Microsoft's own field for this and requires
-		// "limited preview registration" per their docs, so it is frequently
-		// absent. Fall back to a generic portal deep link built from alertId,
-		// which is always a full ARM resource ID.
-		add("Portal", portalURL(e.AlertID))
-	}
+	// Both links, when available: they are different destinations. Portal is the
+	// alert itself; investigationLink opens the AI investigation agent, which is
+	// no substitute for the alert page and must not suppress it.
+	add("Portal", portalURL(e.AlertID))
+	add("Investigate", e.InvestigationLink)
 
 	if len(ctxLines) > 0 {
 		lines = append(lines, "")
