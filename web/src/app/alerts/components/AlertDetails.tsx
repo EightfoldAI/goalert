@@ -25,6 +25,7 @@ import { DateTime } from 'luxon'
 import { ServiceLink } from '../../links'
 import { styles as globalStyles } from '../../styles/materialStyles'
 import Markdown from '../../util/Markdown'
+import { normalizeCloudWatchLinks } from '../../util/cloudwatchLinks'
 import AlertDetailLogs from '../AlertDetailLogs'
 import AppLink from '../../util/AppLink'
 import CardActions from '../../details/CardActions'
@@ -232,7 +233,7 @@ export default function AlertDetails(
 
   function renderAlertDetails(): ReactNode {
     const alert = props.data
-    let details = (alert.details || '').trim()
+    let details = normalizeCloudWatchLinks((alert.details || '').trim())
     if (!details) return null
 
     if (!fullDescription && details.length > 1000) {
