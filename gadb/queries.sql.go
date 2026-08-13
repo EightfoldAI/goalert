@@ -668,6 +668,56 @@ func (q *Queries) Alert_LockManyAlertServices(ctx context.Context, alertIds []in
 	return err
 }
 
+const alert_LockOneAlertDetails = `-- name: Alert_LockOneAlertDetails :one
+SELECT
+    details
+FROM
+    alerts
+WHERE
+    id = $1
+    -- ensure the alert is associated with the service, if coming from an integration
+    AND (service_id = $2
+        OR $2 IS NULL)
+FOR UPDATE
+`
+
+type Alert_LockOneAlertDetailsParams struct {
+	ID        int64
+	ServiceID uuid.NullUUID
+}
+
+// Returns the details for the alert and locks its row, so that a read-modify-write
+// of details cannot interleave with a concurrent one.
+func (q *Queries) Alert_LockOneAlertDetails(ctx context.Context, arg Alert_LockOneAlertDetailsParams) (string, error) {
+	row := q.db.QueryRowContext(ctx, alert_LockOneAlertDetails, arg.ID, arg.ServiceID)
+	var details string
+	err := row.Scan(&details)
+	return details, err
+}
+
+const alert_LockOneAlertMetadata = `-- name: Alert_LockOneAlertMetadata :one
+SELECT
+    id
+FROM
+    alerts
+WHERE
+    id = $1
+FOR UPDATE
+`
+
+// Locks the alert's row for a metadata read-modify-write, so two concurrent
+// writers cannot both read the same starting document and one silently
+// overwrite the other. Locks alerts, not alert_data: alert_data has no row
+// before an alert's first metadata write, and FOR UPDATE against a table with
+// no matching row locks nothing, so it could not serialize the first-writer
+// case, which is the common one for a brand new alert.
+func (q *Queries) Alert_LockOneAlertMetadata(ctx context.Context, id int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, alert_LockOneAlertMetadata, id)
+	var id_2 int64
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
 const alert_LockOneAlertService = `-- name: Alert_LockOneAlertService :one
 SELECT
     maintenance_expires_at NOTNULL::bool AS is_maint_mode,
@@ -804,6 +854,34 @@ type Alert_SetAlertMetadataParams struct {
 // Sets the metadata for the alert.
 func (q *Queries) Alert_SetAlertMetadata(ctx context.Context, arg Alert_SetAlertMetadataParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, alert_SetAlertMetadata, arg.ID, arg.Metadata, arg.ServiceID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const alert_SetDetails = `-- name: Alert_SetDetails :execrows
+UPDATE
+    alerts
+SET
+    details = $2
+WHERE
+    id = $1
+    AND status != 'closed'
+    -- ensure the alert is associated with the service, if coming from an integration
+    AND (service_id = $3
+        OR $3 IS NULL)
+`
+
+type Alert_SetDetailsParams struct {
+	ID        int64
+	Details   string
+	ServiceID uuid.NullUUID
+}
+
+// Sets the details for the alert.
+func (q *Queries) Alert_SetDetails(ctx context.Context, arg Alert_SetDetailsParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, alert_SetDetails, arg.ID, arg.Details, arg.ServiceID)
 	if err != nil {
 		return 0, err
 	}

@@ -20,6 +20,22 @@ type metadataDBFormat struct {
 	AlertMetaV1 map[string]string
 }
 
+// LockMetadataTx locks the alert's row for the remainder of the transaction, so
+// a metadata read-modify-write cannot interleave with a concurrent one. Returns
+// sql.ErrNoRows if the alert does not exist.
+//
+// Callers must take this lock BEFORE calling Metadata, or the lock does nothing:
+// locking after the read has already raced.
+func (s Store) LockMetadataTx(ctx context.Context, db gadb.DBTX, alertID int) error {
+	err := permission.LimitCheckAny(ctx, permission.System, permission.User, permission.Service)
+	if err != nil {
+		return err
+	}
+
+	_, err = gadb.New(db).Alert_LockOneAlertMetadata(ctx, int64(alertID))
+	return err
+}
+
 // Metadata returns the metadata for a single alert. If err == nil, meta is guaranteed to be non-nil. If the alert has no metadata, an empty map is returned.
 func (s *Store) Metadata(ctx context.Context, db gadb.DBTX, alertID int) (meta map[string]string, err error) {
 	err = permission.LimitCheckAny(ctx, permission.System, permission.User)

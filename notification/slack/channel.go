@@ -46,6 +46,13 @@ const (
 	colorAcked   = "#867321"
 )
 
+// alertStateEmoji maps an AlertState to a status circle emoji, shown next to the alert title.
+var alertStateEmoji = map[notification.AlertState]string{
+	notification.AlertStateUnacknowledged: "🔴",
+	notification.AlertStateAcknowledged:   "🟡",
+	notification.AlertStateClosed:         "🟢",
+}
+
 var (
 	_ nfydest.MessageSender       = &ChannelSender{}
 	_ notification.ReceiverSetter = &ChannelSender{}
@@ -358,10 +365,10 @@ func (s *ChannelSender) loadChannels(ctx context.Context) ([]Channel, error) {
 	return channels, nil
 }
 
-func alertLink(ctx context.Context, id int, summary string) string {
+func alertLink(ctx context.Context, id int, summary string, state notification.AlertState) string {
 	cfg := config.FromContext(ctx)
 	path := fmt.Sprintf("/alerts/%d", id)
-	return fmt.Sprintf("<%s|Alert #%d: %s>", cfg.CallbackURL(path), id, slackutilsx.EscapeMessage(summary))
+	return fmt.Sprintf("%s <%s|Alert #%d: %s>", alertStateEmoji[state], cfg.CallbackURL(path), id, slackutilsx.EscapeMessage(summary))
 }
 
 const (
@@ -375,7 +382,7 @@ const (
 func alertMsgOption(ctx context.Context, callbackID string, id int, summary, logEntry string, state notification.AlertState) slack.MsgOption {
 	blocks := []slack.Block{
 		slack.NewSectionBlock(
-			slack.NewTextBlockObject("mrkdwn", alertLink(ctx, id, summary), false, false), nil, nil),
+			slack.NewTextBlockObject("mrkdwn", alertLink(ctx, id, summary, state), false, false), nil, nil),
 	}
 
 	var color string
@@ -459,7 +466,7 @@ func (s *ChannelSender) SendMessage(ctx context.Context, msg notification.Messag
 			// Reply in thread if we already sent a message for this alert.
 			threadOpts := []slack.MsgOption{
 				slack.MsgOptionTS(ts),
-				slack.MsgOptionText(alertLink(ctx, t.AlertID, t.Summary), false),
+				slack.MsgOptionText(alertLink(ctx, t.AlertID, t.Summary, notification.AlertStateUnacknowledged), false),
 			}
 
 			// Conditionally add broadcast based on config (default: enabled)

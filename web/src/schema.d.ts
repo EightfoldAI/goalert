@@ -126,6 +126,11 @@ export interface AlertsByStatus {
   unacked: number
 }
 
+export interface AppendAlertDetailsInput {
+  alertID: number
+  text: string
+}
+
 export interface AuthSubject {
   providerID: string
   subjectID: string
@@ -651,6 +656,8 @@ export interface IntegrationKeySearchOptions {
 }
 
 export type IntegrationKeyType =
+  | 'azureMonitor'
+  | 'cloudwatch'
   | 'email'
   | 'generic'
   | 'grafana'
@@ -760,6 +767,7 @@ export interface MessageStatusHistory {
 
 export interface Mutation {
   addAuthSubject: boolean
+  appendAlertDetails: boolean
   clearTemporarySchedules: boolean
   closeMatchingAlert: boolean
   createAlert?: null | Alert
@@ -791,6 +799,7 @@ export interface Mutation {
   reEncryptKeyringsAndConfig: boolean
   sendContactMethodVerification: boolean
   sendSignal: boolean
+  setAlertMetadata: boolean
   setAlertNoiseReason: boolean
   setConfig: boolean
   setFavorite: boolean
@@ -1121,6 +1130,11 @@ export interface ServiceSearchOptions {
   omit?: null | string[]
   only?: null | string[]
   search?: null | string
+}
+
+export interface SetAlertMetadataInput {
+  alertID: number
+  meta: AlertMetadataInput[]
 }
 
 export interface SetAlertNoiseReasonInput {

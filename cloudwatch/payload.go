@@ -1,0 +1,321 @@
+package cloudwatch
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/target/goalert/alert"
+	"github.com/target/goalert/validation/validate"
+)
+
+const (
+	// maxReasonLen bounds NewStateReason, the one unbounded field in practice.
+	// Without it a verbose reason pushes AlarmDescription -- which carries the
+	// runbook URL -- past MaxDetailsLength and it gets truncated away.
+	maxReasonLen = 2048
+
+	// maxMetaValueLen is a first-pass bound on each value, in RUNES. Values come
+	// straight from the payload, and exceeding alert.ValidateMetadata's total cap
+	// is a client error, which SNS would retry forever. This alone is not
+	// sufficient to guarantee staying under that cap, which sums BYTES: with
+	// today's 7 keys, 7*1024 4-byte runes would be ~28KiB, under the 32KiB limit,
+	// but only arithmetically -- it breaks the moment another key is added.
+	// cleanMeta enforces the real, byte-based budget as a second pass.
+	maxMetaValueLen = 1024
+
+	// maxMetaTotalBytes leaves headroom under alert.ValidateMetadata's 32768-byte
+	// cap for the metadata keys themselves -- short ASCII constants, but sized off
+	// as a margin rather than their exact total so this doesn't need updating
+	// every time a key is added to alarmMeta.
+	maxMetaTotalBytes = 32000
+)
+
+// cloudWatchAlarm is the subset of a CloudWatch alarm notification we map.
+type cloudWatchAlarm struct {
+	AlarmName        string `json:"AlarmName"`
+	AlarmDescription string `json:"AlarmDescription"`
+	AWSAccountID     string `json:"AWSAccountId"`
+	NewStateValue    string `json:"NewStateValue"`
+	OldStateValue    string `json:"OldStateValue"`
+	NewStateReason   string `json:"NewStateReason"`
+	StateChangeTime  string `json:"StateChangeTime"`
+	AlarmARN         string `json:"AlarmArn"`
+
+	// Region is CloudWatch's display name, e.g. "US West (Oregon)". Deliberately
+	// unused: region always comes from the topic ARN.
+	Region string `json:"Region"`
+
+	Trigger struct {
+		Namespace  string `json:"Namespace"`
+		MetricName string `json:"MetricName"`
+	} `json:"Trigger"`
+}
+
+// buildAlert maps a verified SNS Notification onto an alert.
+//
+// The returned alert has ServiceID unset; the caller fills it in from the
+// integration key. Source is always alert.SourceCloudwatch and Dedup is always
+// non-nil -- a nil Dedup would silently fall back to a content hash that changes
+// on every state transition, breaking both idempotency and the OK close.
+//
+// ok is false when the notification is intentionally ignored and nothing at all
+// should be created (today: CloudWatch INSUFFICIENT_DATA). There is no error
+// return: any body we cannot read as a CloudWatch alarm is mapped as a raw
+// notification instead of failing, so this can never produce a 4xx.
+func buildAlert(e envelope) (a alert.Alert, meta map[string]string, ok bool) {
+	region, topic := splitTopicARN(e.TopicARN)
+
+	var alarm cloudWatchAlarm
+	err := json.Unmarshal([]byte(e.Message), &alarm)
+
+	// Tolerate a type mismatch on some other field: encoding/json still fills
+	// everything it could decode, so a numeric AWSAccountId maps as an alarm
+	// minus that one value rather than losing the dedup contract entirely.
+	// Note the branch test is a bare non-empty check, matching the reference's
+	// truthiness gate: a whitespace-only AlarmName is still a CloudWatch alarm,
+	// and buildAlarm gives it the "unnamed alarm" fallback rather than letting it
+	// through as a raw notification with a blank summary.
+	var typeErr *json.UnmarshalTypeError
+	isAlarm := (err == nil || errors.As(err, &typeErr)) && alarm.AlarmName != ""
+	if isAlarm {
+		return buildAlarm(alarm, region, topic)
+	}
+
+	return buildRaw(e, topic), cleanMeta(map[string]string{
+		"topic":  topic,
+		"region": region,
+		"source": "sns-raw",
+	}), true
+}
+
+func buildAlarm(al cloudWatchAlarm, region, topic string) (alert.Alert, map[string]string, bool) {
+	// region is derived from the SNS topic's ARN, which is only the alarm's
+	// true region by coincidence: the deployed architecture is one topic
+	// receiving alarms from every region, so a topic's region and a given
+	// alarm's region routinely differ. Prefer the alarm's own ARN when it
+	// parses -- otherwise "Region:" here can silently disagree with the
+	// Console link below, which always uses the alarm's own ARN.
+	if alarmRegion, _, ok := parseAlarmARN(al.AlarmARN); ok {
+		region = alarmRegion
+	}
+
+	if strings.EqualFold(al.NewStateValue, "INSUFFICIENT_DATA") {
+		return alert.Alert{}, nil, false
+	}
+
+	// Sanitize before testing emptiness, not TrimSpace: SanitizeText also strips
+	// non-printable control characters, which TrimSpace leaves alone. Testing the
+	// raw value would let e.g. AlarmName == "\x01\x02" through as non-blank, only
+	// for SanitizeText to reduce it to "" a few lines down. That does NOT fail
+	// validation -- validate.Text treats an empty body as valid regardless of its
+	// minimum length -- so the fallback would be silently skipped and the alert
+	// created with a blank Summary: real, but useless to whoever is paged.
+	name := al.AlarmName
+	if sanitizeSummary(name) == "" {
+		name = "unnamed alarm on " + topic
+	}
+
+	status := alert.StatusTriggered
+	if al.NewStateValue == "OK" {
+		status = alert.StatusClosed
+	}
+
+	return alert.Alert{
+		Summary: validate.SanitizeText(name, alert.MaxSummaryLength),
+		Details: validate.SanitizeText(alarmDetails(al, region, topic), alert.MaxDetailsLength),
+		Source:  alert.SourceCloudwatch,
+		Status:  status,
+
+		// Cross-system contract: hex sha256 of the untruncated, unsanitized alarm
+		// name, matching the CloudWatch alarm Lambdas that post to PagerDuty.
+		// Changing it means one alarm produces two alerts.
+		Dedup: alert.NewUserDedup(sha256Hex(name)),
+	}, alarmMeta(al, region, topic), true
+}
+
+func alarmDetails(al cloudWatchAlarm, region, topic string) string {
+	lines := []string{"State: " + al.OldStateValue + " -> " + al.NewStateValue}
+
+	add := func(label, value string) {
+		if value != "" {
+			lines = append(lines, label+": "+value)
+		}
+	}
+	add("Reason", truncRunes(al.NewStateReason, maxReasonLen))
+	add("Changed", al.StateChangeTime)
+	add("Region", region)
+	add("Account", al.AWSAccountID)
+	if al.Trigger.MetricName != "" {
+		add("Metric", al.Trigger.Namespace+"/"+al.Trigger.MetricName)
+	}
+	add("Topic", topic)
+	add("Alarm ARN", al.AlarmARN)
+	add("Console", alarmConsoleURL(al.AlarmARN))
+
+	if al.AlarmDescription != "" {
+		// Blank line, then the description verbatim: it carries the runbook URL.
+		lines = append(lines, "", al.AlarmDescription)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// parseAlarmARN extracts the region and alarm name from a CloudWatch alarm
+// ARN, e.g. arn:aws:cloudwatch:us-west-2:123456789012:alarm:AlarmName.
+func parseAlarmARN(arn string) (region, name string, ok bool) {
+	// SplitN(...,7) so a name containing a literal colon (unusual, but not
+	// disallowed) stays whole in the last segment rather than being truncated.
+	parts := strings.SplitN(arn, ":", 7)
+	if len(parts) != 7 || parts[0] != "arn" || parts[2] != "cloudwatch" || parts[5] != "alarm" {
+		return "", "", false
+	}
+	region, name = parts[3], parts[6]
+	if region == "" || name == "" {
+		return "", "", false
+	}
+	return region, name, true
+}
+
+// alarmConsoleURL builds a deep link to the alarm in the AWS console from its
+// ARN, e.g. arn:aws:cloudwatch:us-west-2:123456789012:alarm:AlarmName.
+//
+// Returns "" for anything that doesn't parse as a CloudWatch alarm ARN, rather
+// than a broken link -- ARN is attacker-influenced (it's a field in the signed
+// payload, but not otherwise validated), and malformed input must degrade
+// gracefully like every other field here.
+func alarmConsoleURL(arn string) string {
+	region, name, ok := parseAlarmARN(arn)
+	if !ok {
+		return ""
+	}
+
+	// PathEscape, not QueryEscape: this is a URL fragment that the console's own
+	// JS decodes with decodeURIComponent, which does NOT treat "+" as a space --
+	// QueryEscape's "+" for spaces would silently mangle any alarm name
+	// containing one, and real alarm names commonly do (e.g. "[us-west-2] Too
+	// Many Write Errors").
+	return fmt.Sprintf("https://%s.console.aws.amazon.com/cloudwatch/home?region=%s#alarmsV2:alarm/%s",
+		region, region, url.PathEscape(name))
+}
+
+func alarmMeta(al cloudWatchAlarm, region, topic string) map[string]string {
+	return cleanMeta(map[string]string{
+		"topic":       topic,
+		"region":      region,
+		"state":       al.NewStateValue,
+		"aws_account": al.AWSAccountID,
+		"namespace":   al.Trigger.Namespace,
+		"metric":      al.Trigger.MetricName,
+		"alarm_arn":   al.AlarmARN,
+	})
+}
+
+// buildRaw maps a non-CloudWatch SNS notification. Raw notifications never close.
+func buildRaw(e envelope, topic string) alert.Alert {
+	// Each candidate is sanitized before the emptiness test: a whitespace-only
+	// Subject is truthy but sanitizes to "".
+	summary := sanitizeSummary(derefStr(e.Subject))
+	if summary == "" {
+		summary = sanitizeSummary(firstLine(e.Message))
+	}
+	if summary == "" {
+		summary = sanitizeSummary("SNS notification on " + topic)
+	}
+
+	return alert.Alert{
+		Summary: summary,
+		Details: validate.SanitizeText(e.Message, alert.MaxDetailsLength),
+		Source:  alert.SourceCloudwatch,
+		Status:  alert.StatusTriggered,
+		Dedup:   alert.NewUserDedup(sha256Hex(topic + "|" + summary)),
+	}
+}
+
+// splitTopicARN returns the region and topic name from an SNS topic ARN of the
+// form arn:aws:sns:<region>:<account>:<topic>. A malformed or short ARN yields
+// empty segments rather than panicking.
+func splitTopicARN(arn string) (region, topic string) {
+	parts := strings.Split(arn, ":")
+	if len(parts) > 3 {
+		region = parts[3]
+	}
+	// strings.Split never returns an empty slice, so this index is always safe.
+	return region, parts[len(parts)-1]
+}
+
+func sanitizeSummary(s string) string { return validate.SanitizeText(s, alert.MaxSummaryLength) }
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
+}
+
+func truncRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// cleanMeta drops empty values and bounds the rest so the map can never fail
+// alert.ValidateMetadata's total-size check. Values are not sanitized: they are
+// JSON-marshalled on write, so control characters are escaped rather than
+// injected, and trimming would corrupt an ARN.
+//
+// The per-value rune cap alone is not enough: it bounds runes, but
+// ValidateMetadata sums bytes, and enough multi-byte values at that cap can add
+// up to more bytes than the total allows. The byte budget below is computed from
+// however many keys are actually non-empty, rather than hardcoded to today's key
+// count, so the total still fits if alarmMeta gains another key later.
+func cleanMeta(m map[string]string) map[string]string {
+	for k, v := range m {
+		if v == "" {
+			delete(m, k)
+		}
+	}
+
+	perValueBudget := maxMetaTotalBytes
+	if n := len(m); n > 0 {
+		perValueBudget = maxMetaTotalBytes / n
+	}
+
+	for k, v := range m {
+		v = truncRunes(v, maxMetaValueLen)
+		m[k] = truncBytes(v, perValueBudget)
+	}
+	return m
+}
+
+// truncBytes truncates s to at most n bytes without splitting a UTF-8 rune's
+// encoding -- a plain byte-slice cut can leave a trailing partial rune, which
+// ToValidUTF8 then scrubs rather than emit invalid UTF-8 into the metadata.
+func truncBytes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "")
+}

@@ -453,6 +453,106 @@ func (m *Mutation) CreateAlert(ctx context.Context, input graphql2.CreateAlertIn
 	return newAlert, nil
 }
 
+// SetAlertMetadata merges the given key/value pairs into an existing alert's
+// metadata. Keys not listed are left untouched -- this is a merge, not a
+// replace, even though the underlying store call replaces the whole document;
+// existing values are read first and folded in so a caller setting one key
+// cannot wipe out metadata set by whatever created the alert.
+//
+// The read is preceded by LockMetadataTx, which locks the alert's row for the
+// rest of the transaction. Without it, two concurrent calls setting different
+// keys on the same alert (e.g. two automations, one writing jira_ticket and one
+// writing pd_incident) can both read the same starting document and one commits
+// last, silently discarding whatever the other added -- while still returning
+// true to that caller.
+func (m *Mutation) SetAlertMetadata(ctx context.Context, input graphql2.SetAlertMetadataInput) (bool, error) {
+	add := make(map[string]string, len(input.Meta))
+	for _, kv := range input.Meta {
+		add[kv.Key] = kv.Value
+	}
+
+	err := withContextTx(ctx, m.DB, func(ctx context.Context, tx *sql.Tx) error {
+		err := m.AlertStore.LockMetadataTx(ctx, tx, input.AlertID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Consistent with AppendAlertDetails: a missing AlertID is a client input
+			// error, not a server fault, so it is translated here rather than left to
+			// surface later as SetMetadataTx's access-denied fallback for a 0-row
+			// update, which conflates "no such alert" with "wrong service".
+			return validation.NewFieldError("AlertID", "not found")
+		}
+		if err != nil {
+			return err
+		}
+
+		existing, err := m.AlertStore.Metadata(ctx, tx, input.AlertID)
+		if err != nil {
+			return err
+		}
+
+		merged := make(map[string]string, len(existing)+len(add))
+		for k, v := range existing {
+			merged[k] = v
+		}
+		for k, v := range add {
+			merged[k] = v
+		}
+
+		return m.AlertStore.SetMetadataTx(ctx, tx, input.AlertID, merged)
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// AppendAlertDetails appends text to an existing alert's Details, separated by
+// a blank line from whatever is already there.
+//
+// Unlike SetAlertMetadata there is no merge-friendly key/value store to fold into:
+// Details is free text with no per-key structure, so preserving existing content
+// means reading it and appending. The read therefore takes a row lock and happens
+// inside the write's transaction -- without the lock, two concurrent appends on
+// the same alert both read the same original and the second silently discards
+// the first while still returning true. (An ingress CreateOrUpdate racing this is
+// not a concern here: it only ever writes Details at creation, never on an
+// existing dedup match, so there is no concurrent writer to race outside of
+// AppendAlertDetails itself.)
+//
+// The append is deliberately not pushed down into SQL, which would remove the read
+// entirely: SanitizeText's rune-aware truncation and "…" marker are applied to the
+// combined text, and left() over bytes is not equivalent.
+func (m *Mutation) AppendAlertDetails(ctx context.Context, input graphql2.AppendAlertDetailsInput) (bool, error) {
+	err := withContextTx(ctx, m.DB, func(ctx context.Context, tx *sql.Tx) error {
+		current, err := m.AlertStore.LockDetailsTx(ctx, tx, input.AlertID)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The bare sql.ErrNoRows is an implementation detail; a missing AlertID is
+			// a client input error, not a server fault -- translating it keeps it out
+			// of the error-level server logs (the smoke harness treats any error-level
+			// log line as a test failure) and gives the caller an actionable message
+			// instead of a raw SQL error string.
+			return validation.NewFieldError("AlertID", "not found")
+		}
+		if err != nil {
+			return err
+		}
+
+		details := current
+		if details != "" {
+			details += "\n\n"
+		}
+		details += input.Text
+		details = validate.SanitizeText(details, alert.MaxDetailsLength)
+
+		return m.AlertStore.SetDetailsTx(ctx, tx, input.AlertID, details)
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 func (a *Alert) NoiseReason(ctx context.Context, raw *alert.Alert) (*string, error) {
 	am, err := (*App)(a).FindOneAlertFeedback(ctx, raw.ID)
 	if err != nil {

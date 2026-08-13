@@ -45,6 +45,25 @@ func unwrapAll(err error) error {
 // HTTPError will respond in a standard way when err != nil. If
 // err is nil, false is returned, true otherwise.
 func HTTPError(ctx context.Context, w http.ResponseWriter, err error) bool {
+	return httpError(ctx, w, err, http.StatusInternalServerError)
+}
+
+// HTTPErrorRetry behaves like HTTPError, except an unexpected server-side error
+// responds 503 rather than 500. Client errors are unchanged: those are permanent
+// and must not be retried.
+//
+// This is for webhook ingress, where the status code is the only back-channel to
+// the sender's retry logic and a dropped delivery is a dropped page. The two
+// providers disagree about 500: SNS retries all 5xx and 429, while Azure Monitor
+// retries only 408, 429, 503 and 504 -- so a 500 during a database outage loses
+// the alert with zero retries. 503 is retried by both.
+func HTTPErrorRetry(ctx context.Context, w http.ResponseWriter, err error) bool {
+	return httpError(ctx, w, err, http.StatusServiceUnavailable)
+}
+
+// httpError maps err onto a response. unexpectedCode is used for errors that
+// match no known classification.
+func httpError(ctx context.Context, w http.ResponseWriter, err error, unexpectedCode int) bool {
 	if err == nil {
 		return false
 	}
@@ -68,8 +87,17 @@ func HTTPError(ctx context.Context, w http.ResponseWriter, err error) bool {
 		// even in the worst case scenario.
 		http.Error(w, "Too many concurrent requests for this key or session", http.StatusTooManyRequests)
 	case errors.Is(err, ctxlock.ErrTimeout):
-		// Similar to above, but that we timed out waiting in the queue.
-		http.Error(w, http.StatusText(http.StatusRequestTimeout), http.StatusRequestTimeout)
+		// Same status as ErrQueueFull above -- this is back-pressure, not a slow
+		// client, so 408 is wrong: it means the *client* failed to send a complete
+		// request in time (RFC 9110 15.5.9), the opposite of what happened, and
+		// webhook senders treat the two very differently -- Amazon SNS retries 429
+		// and all 5xx but treats 408 as a permanent failure, so 408 here silently
+		// discards the delivery instead of backing off. This is an intentional,
+		// application-wide change to every HTTPError caller, not scoped to ingress;
+		// the body text differs from ErrQueueFull's so a client can still tell
+		// "rejected immediately, queue full" from "waited and timed out" even
+		// though the status code is now the same for both.
+		http.Error(w, "Too many concurrent requests for this key or session; timed out waiting", http.StatusTooManyRequests)
 	case isCancel(err):
 		// Client disconnected, send 499 back so logs reflect that this
 		// was a client-side problem.
@@ -86,9 +114,9 @@ func HTTPError(ctx context.Context, w http.ResponseWriter, err error) bool {
 		// Timeout
 		http.Error(w, http.StatusText(http.StatusGatewayTimeout), http.StatusGatewayTimeout)
 	default:
-		// For all other unexpected errors, log the error and send a 500.
+		// For all other unexpected errors, log the error and send unexpectedCode.
 		log.Log(ctx, err)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(unexpectedCode), unexpectedCode)
 	}
 
 	return true

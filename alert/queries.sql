@@ -104,6 +104,48 @@ ON CONFLICT (alert_id)
     WHERE
         alert_data.alert_id = $1;
 
+-- name: Alert_LockOneAlertMetadata :one
+-- Locks the alert's row for a metadata read-modify-write, so two concurrent
+-- writers cannot both read the same starting document and one silently
+-- overwrite the other. Locks alerts, not alert_data: alert_data has no row
+-- before an alert's first metadata write, and FOR UPDATE against a table with
+-- no matching row locks nothing, so it could not serialize the first-writer
+-- case, which is the common one for a brand new alert.
+SELECT
+    id
+FROM
+    alerts
+WHERE
+    id = $1
+FOR UPDATE;
+
+-- name: Alert_LockOneAlertDetails :one
+-- Returns the details for the alert and locks its row, so that a read-modify-write
+-- of details cannot interleave with a concurrent one.
+SELECT
+    details
+FROM
+    alerts
+WHERE
+    id = $1
+    -- ensure the alert is associated with the service, if coming from an integration
+    AND (service_id = $2
+        OR $2 IS NULL)
+FOR UPDATE;
+
+-- name: Alert_SetDetails :execrows
+-- Sets the details for the alert.
+UPDATE
+    alerts
+SET
+    details = $2
+WHERE
+    id = $1
+    AND status != 'closed'
+    -- ensure the alert is associated with the service, if coming from an integration
+    AND (service_id = $3
+        OR $3 IS NULL);
+
 -- name: Alert_ServiceEPHasSteps :one
 -- Returns true if the Escalation Policy for the provided service has at least one step.
 SELECT

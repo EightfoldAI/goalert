@@ -1,0 +1,595 @@
+package cloudwatch
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"unicode/utf8"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/target/goalert/alert"
+)
+
+const (
+	testTopicARN  = "arn:aws:sns:us-west-2:123456789012:PagerDuty-Data"
+	testAlarmName = "[us-west-2] Too Many Write Errors"
+	testRunbook   = "Runbook: https://runbook.example.com/dp/ats-write-errors"
+	testServiceID = "3c1a1a44-8e7a-4d1b-9f4a-2b0e5c6d7f80"
+)
+
+// goldenAlarm is the CloudWatch alarm body used by the golden-path cases.
+const goldenAlarm = `{
+	"AlarmName": "[us-west-2] Too Many Write Errors",
+	"AlarmDescription": "Runbook: https://runbook.example.com/dp/ats-write-errors",
+	"AWSAccountId": "123456789012",
+	"NewStateValue": "ALARM",
+	"OldStateValue": "OK",
+	"NewStateReason": "Threshold Crossed: 1 datapoint was greater than the threshold (1.0).",
+	"StateChangeTime": "2026-07-30T00:00:00.000+0000",
+	"AlarmArn": "arn:aws:cloudwatch:us-west-2:123456789012:alarm:x",
+	"Region": "US West (Oregon)",
+	"Trigger": {"Namespace": "Eightfold/DP", "MetricName": "WriteErrors"}
+}`
+
+const goldenDetails = `State: OK -> ALARM
+Reason: Threshold Crossed: 1 datapoint was greater than the threshold (1.0).
+Changed: 2026-07-30T00:00:00.000+0000
+Region: us-west-2
+Account: 123456789012
+Metric: Eightfold/DP/WriteErrors
+Topic: PagerDuty-Data
+Alarm ARN: arn:aws:cloudwatch:us-west-2:123456789012:alarm:x
+Console: https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/x
+
+Runbook: https://runbook.example.com/dp/ats-write-errors`
+
+func TestAlarmConsoleURL(t *testing.T) {
+	tests := []struct{ name, arn, want string }{
+		{
+			name: "well-formed arn",
+			arn:  "arn:aws:cloudwatch:us-west-2:123456789012:alarm:x",
+			want: "https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/x",
+		},
+		{
+			// Spaces/brackets are common in real alarm names and must be
+			// percent-encoded, not "+"-encoded -- the console's SPA decodes the
+			// fragment with decodeURIComponent, which does not treat "+" as a space.
+			name: "name with spaces and brackets is percent-encoded",
+			arn:  "arn:aws:cloudwatch:us-west-2:123456789012:alarm:[us-west-2] Too Many Write Errors",
+			want: "https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/%5Bus-west-2%5D%20Too%20Many%20Write%20Errors",
+		},
+		{
+			// PathEscape leaves ":" unescaped -- it's valid unencoded in a URL
+			// path segment per RFC 3986 -- so this also confirms SplitN(...,7)
+			// kept the whole name (including its colon) rather than truncating it.
+			name: "name containing a literal colon stays whole",
+			arn:  "arn:aws:cloudwatch:us-west-2:123456789012:alarm:svc:sub-alarm",
+			want: "https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/svc:sub-alarm",
+		},
+		{name: "empty", arn: ""},
+		{name: "short arn does not panic", arn: "arn:aws:cloudwatch"},
+		{name: "wrong service", arn: "arn:aws:sns:us-west-2:123456789012:alarm:x"},
+		{name: "wrong resource type", arn: "arn:aws:cloudwatch:us-west-2:123456789012:topic:x"},
+		{name: "not an arn at all", arn: "not-an-arn"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, alarmConsoleURL(tt.arn))
+		})
+	}
+}
+
+func notification(message string) envelope {
+	return envelope{Type: typeNotification, TopicARN: testTopicARN, Message: message}
+}
+
+func TestSplitTopicARN(t *testing.T) {
+	tests := []struct {
+		name, arn, region, topic string
+	}{
+		{name: "full arn", arn: testTopicARN, region: "us-west-2", topic: "PagerDuty-Data"},
+		{name: "empty", arn: "", region: "", topic: ""},
+		{name: "no colons", arn: "topic", region: "", topic: "topic"},
+		{name: "short arn does not panic", arn: "arn:aws:sns", region: "", topic: "sns"},
+		{name: "exactly four segments", arn: "arn:aws:sns:us-west-2", region: "us-west-2", topic: "us-west-2"},
+		{name: "extra colons take last", arn: "arn:aws:sns:us-west-2:123:my:topic", region: "us-west-2", topic: "topic"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			region, topic := splitTopicARN(tt.arn)
+			assert.Equal(t, tt.region, region, "region")
+			assert.Equal(t, tt.topic, topic, "topic")
+		})
+	}
+}
+
+func TestFirstLine(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{name: "empty", in: "", want: ""},
+		{name: "single line", in: "a", want: "a"},
+		{name: "lf", in: "a\nb", want: "a"},
+		{name: "crlf", in: "a\r\nb", want: "a"},
+		{name: "leading and trailing blank lines", in: "\n\na\n", want: "a"},
+		{name: "whitespace only", in: "   \n  ", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, firstLine(tt.in))
+		})
+	}
+}
+
+func TestBuildAlert_CloudWatch(t *testing.T) {
+	goldenDedup := sha256Hex(testAlarmName)
+
+	t.Run("golden alarm", func(t *testing.T) {
+		a, meta, ok := buildAlert(notification(goldenAlarm))
+		require.True(t, ok)
+
+		assert.Equal(t, testAlarmName, a.Summary)
+		assert.Equal(t, goldenDetails, a.Details)
+		assert.Equal(t, alert.StatusTriggered, a.Status)
+		assert.Equal(t, alert.SourceCloudwatch, a.Source)
+		require.NotNil(t, a.Dedup)
+		assert.Equal(t, goldenDedup, a.Dedup.Payload)
+		assert.Equal(t, map[string]string{
+			"topic":       "PagerDuty-Data",
+			"region":      "us-west-2",
+			"state":       "ALARM",
+			"aws_account": "123456789012",
+			"namespace":   "Eightfold/DP",
+			"metric":      "WriteErrors",
+			"alarm_arn":   "arn:aws:cloudwatch:us-west-2:123456789012:alarm:x",
+		}, meta)
+	})
+
+	// The dedup key must be identical to the ALARM case or the close never
+	// matches the open alert.
+	t.Run("OK closes with the same dedup", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm, `"NewStateValue": "ALARM"`, `"NewStateValue": "OK"`, 1)
+		a, meta, ok := buildAlert(notification(body))
+		require.True(t, ok)
+
+		assert.Equal(t, alert.StatusClosed, a.Status)
+		require.NotNil(t, a.Dedup)
+		assert.Equal(t, goldenDedup, a.Dedup.Payload)
+		assert.Equal(t, "OK", meta["state"])
+	})
+
+	t.Run("INSUFFICIENT_DATA creates nothing", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm, `"NewStateValue": "ALARM"`, `"NewStateValue": "INSUFFICIENT_DATA"`, 1)
+		_, meta, ok := buildAlert(notification(body))
+		assert.False(t, ok)
+		assert.Nil(t, meta)
+	})
+
+	t.Run("insufficient_data is case insensitive", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm, `"NewStateValue": "ALARM"`, `"NewStateValue": "insufficient_data"`, 1)
+		_, _, ok := buildAlert(notification(body))
+		assert.False(t, ok)
+	})
+
+	// The reference implementation compares state == "OK" exactly, so a
+	// lowercase "ok" triggers rather than closes. CloudWatch only ever sends
+	// uppercase; this pins the asymmetry with INSUFFICIENT_DATA above.
+	t.Run("lowercase ok triggers", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm, `"NewStateValue": "ALARM"`, `"NewStateValue": "ok"`, 1)
+		a, _, ok := buildAlert(notification(body))
+		require.True(t, ok)
+		assert.Equal(t, alert.StatusTriggered, a.Status)
+	})
+
+	t.Run("no description means no trailing blank line", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm, `"AlarmDescription": "`+testRunbook+`",`, "", 1)
+		a, _, ok := buildAlert(notification(body))
+		require.True(t, ok)
+
+		assert.True(t, strings.HasSuffix(a.Details, "Console: https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#alarmsV2:alarm/x"), a.Details)
+		assert.NotContains(t, a.Details, testRunbook)
+	})
+
+	t.Run("null description", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm, `"AlarmDescription": "`+testRunbook+`"`, `"AlarmDescription": null`, 1)
+		a, _, ok := buildAlert(notification(body))
+		require.True(t, ok)
+		assert.NotContains(t, a.Details, testRunbook)
+	})
+
+	t.Run("minimal fields", func(t *testing.T) {
+		e := envelope{Type: typeNotification, Message: `{"AlarmName":"x","NewStateValue":"ALARM"}`}
+		a, meta, ok := buildAlert(e)
+		require.True(t, ok)
+
+		// The State line is unconditional even with an empty old state.
+		assert.Equal(t, "State:  -> ALARM", a.Details)
+		assert.Equal(t, map[string]string{"state": "ALARM"}, meta)
+	})
+
+	t.Run("metric line requires a metric name", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm, `"MetricName": "WriteErrors"`, `"MetricName": ""`, 1)
+		a, meta, ok := buildAlert(notification(body))
+		require.True(t, ok)
+
+		assert.NotContains(t, a.Details, "Metric:")
+		assert.Equal(t, "Eightfold/DP", meta["namespace"])
+		assert.NotContains(t, meta, "metric")
+	})
+
+	t.Run("metric name without namespace keeps leading slash", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm, `"Namespace": "Eightfold/DP"`, `"Namespace": ""`, 1)
+		a, _, ok := buildAlert(notification(body))
+		require.True(t, ok)
+		assert.Contains(t, a.Details, "Metric: /WriteErrors")
+	})
+
+	// Summary is truncated but the dedup hashes the full name, so truncation can
+	// never collapse two distinct alarms onto one alert.
+	t.Run("summary truncated but dedup is not", func(t *testing.T) {
+		long := strings.Repeat("x", 1200)
+		a, _, ok := buildAlert(notification(`{"AlarmName":"` + long + `","NewStateValue":"ALARM"}`))
+		require.True(t, ok)
+
+		assert.Len(t, []rune(a.Summary), alert.MaxSummaryLength)
+		assert.True(t, strings.HasSuffix(a.Summary, "…"))
+		require.NotNil(t, a.Dedup)
+		assert.Equal(t, sha256Hex(long), a.Dedup.Payload)
+	})
+
+	// The whole point of capping NewStateReason: it is the one unbounded field, so
+	// without the cap it would crowd the runbook URL past the details limit.
+	// Capping it keeps the whole body comfortably under the limit instead.
+	t.Run("huge reason still keeps the runbook", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm,
+			`"NewStateReason": "Threshold Crossed: 1 datapoint was greater than the threshold (1.0)."`,
+			`"NewStateReason": "`+strings.Repeat("r", 10000)+`"`, 1)
+		a, _, ok := buildAlert(notification(body))
+		require.True(t, ok)
+
+		assert.LessOrEqual(t, len([]rune(a.Details)), alert.MaxDetailsLength)
+		assert.NotContains(t, a.Details, "…", "details should fit without truncation")
+		assert.Contains(t, a.Details, testRunbook)
+		assert.Contains(t, a.Details, "Reason: "+strings.Repeat("r", maxReasonLen)+"\n")
+		assert.NotContains(t, a.Details, strings.Repeat("r", maxReasonLen+1))
+	})
+
+	t.Run("region comes from the arn not the display name", func(t *testing.T) {
+		a, meta, ok := buildAlert(notification(goldenAlarm))
+		require.True(t, ok)
+
+		assert.Contains(t, a.Details, "Region: us-west-2")
+		assert.Equal(t, "us-west-2", meta["region"])
+		assert.NotContains(t, a.Details, "Oregon")
+		for k, v := range meta {
+			assert.NotContains(t, v, "Oregon", "meta[%s]", k)
+		}
+	})
+
+	// The real deployment is one SNS topic (in one region) receiving alarms from
+	// every region, so a topic's own region and a given alarm's region routinely
+	// differ. Region must reflect the alarm, not the topic -- otherwise "Region:"
+	// and the Console link (which always uses the alarm's own ARN) could show
+	// two different regions on the same alert.
+	t.Run("cross-region: alarm's own region wins over the topic's", func(t *testing.T) {
+		body := strings.Replace(goldenAlarm,
+			`"AlarmArn": "arn:aws:cloudwatch:us-west-2:123456789012:alarm:x"`,
+			`"AlarmArn": "arn:aws:cloudwatch:us-east-1:123456789012:alarm:x"`, 1)
+		// testTopicARN is us-west-2; the alarm itself is us-east-1.
+		a, meta, ok := buildAlert(notification(body))
+		require.True(t, ok)
+
+		assert.Contains(t, a.Details, "Region: us-east-1")
+		assert.NotContains(t, a.Details, "Region: us-west-2")
+		assert.Equal(t, "us-east-1", meta["region"])
+
+		// The Console link must agree with the Region line, not the topic.
+		assert.Contains(t, a.Details, "Console: https://us-east-1.console.aws.amazon.com/")
+		assert.NotContains(t, a.Details, "console.aws.amazon.com/cloudwatch/home?region=us-west-2")
+
+		// Topic still correctly reflects the topic ARN -- only region changes.
+		assert.Contains(t, a.Details, "Topic: PagerDuty-Data")
+		assert.Equal(t, "PagerDuty-Data", meta["topic"])
+	})
+
+	t.Run("malformed topic arn still falls back to the alarm's own region", func(t *testing.T) {
+		e := envelope{Type: typeNotification, TopicARN: "arn:aws:sns", Message: goldenAlarm}
+		a, meta, ok := buildAlert(e)
+		require.True(t, ok)
+
+		// A malformed topic ARN yields no region on its own, but AlarmArn (present
+		// in goldenAlarm) is independently valid, so region is still populated.
+		assert.Contains(t, a.Details, "Region: us-west-2")
+		assert.Equal(t, "us-west-2", meta["region"])
+
+		assert.Contains(t, a.Details, "Topic: sns")
+		assert.Equal(t, "sns", meta["topic"])
+	})
+
+	t.Run("empty topic arn falls back to the alarm's own region", func(t *testing.T) {
+		e := envelope{Type: typeNotification, Message: goldenAlarm}
+		a, meta, ok := buildAlert(e)
+		require.True(t, ok)
+
+		// Region has an alarm-level fallback (AlarmArn, present in goldenAlarm),
+		// so it's populated even with no topic ARN at all.
+		assert.Contains(t, a.Details, "Region: us-west-2")
+		assert.Equal(t, "us-west-2", meta["region"])
+
+		// Topic has no alarm-level equivalent to fall back to.
+		assert.NotContains(t, a.Details, "Topic:")
+		assert.NotContains(t, meta, "topic")
+		assert.Equal(t, testAlarmName, a.Summary)
+	})
+
+	// A blank-but-present AlarmName would otherwise sanitize to an empty summary,
+	// which alert.Normalize accepts, producing an unactionable alert.
+	t.Run("blank alarm name gets the fallback", func(t *testing.T) {
+		a, _, ok := buildAlert(notification(`{"AlarmName":"   ","NewStateValue":"ALARM"}`))
+		require.True(t, ok)
+
+		assert.Equal(t, "unnamed alarm on PagerDuty-Data", a.Summary)
+		require.NotNil(t, a.Dedup)
+		assert.Equal(t, sha256Hex("unnamed alarm on PagerDuty-Data"), a.Dedup.Payload)
+	})
+
+	// AlarmName made only of non-printable control characters is non-blank under
+	// TrimSpace (which only strips whitespace) but sanitizes to "" -- the gate
+	// must test the sanitized value or this slips through as a blank summary
+	// instead of getting the fallback.
+	t.Run("control-character-only alarm name gets the fallback", func(t *testing.T) {
+		// json.Marshal, not a raw literal, so the control bytes are correctly
+		// JSON-escaped rather than producing invalid JSON that falls through to the
+		// raw-notification branch instead of exercising buildAlarm at all.
+		msg, err := json.Marshal(map[string]string{
+			"AlarmName":     "\x01\x02",
+			"NewStateValue": "ALARM",
+		})
+		require.NoError(t, err)
+
+		a, _, ok := buildAlert(notification(string(msg)))
+		require.True(t, ok)
+
+		assert.Equal(t, "unnamed alarm on PagerDuty-Data", a.Summary)
+		assert.NotEmpty(t, a.Summary, "must never be blank: an empty Summary passes validate.Text silently")
+	})
+
+	// encoding/json fills what it can, so one wrong-typed field must not cost us
+	// the CloudWatch branch and its dedup contract.
+	t.Run("wrong typed field still maps as an alarm", func(t *testing.T) {
+		a, meta, ok := buildAlert(notification(`{"AlarmName":"x","AWSAccountId":12345,"NewStateValue":"ALARM"}`))
+		require.True(t, ok)
+
+		assert.Equal(t, "x", a.Summary)
+		assert.NotContains(t, a.Details, "Account:")
+		assert.NotContains(t, meta, "aws_account")
+	})
+
+	t.Run("non string alarm name falls through to raw", func(t *testing.T) {
+		_, meta, ok := buildAlert(notification(`{"AlarmName":123,"x":"y"}`))
+		require.True(t, ok)
+		assert.Equal(t, "sns-raw", meta["source"])
+	})
+}
+
+func TestBuildAlert_Raw(t *testing.T) {
+	t.Run("subject wins", func(t *testing.T) {
+		e := notification("line one\nline two")
+		e.Subject = strPtr("Backup failed")
+		a, meta, ok := buildAlert(e)
+		require.True(t, ok)
+
+		assert.Equal(t, "Backup failed", a.Summary)
+		assert.Equal(t, "line one\nline two", a.Details)
+		assert.Equal(t, alert.StatusTriggered, a.Status)
+		require.NotNil(t, a.Dedup)
+		assert.Equal(t, sha256Hex("PagerDuty-Data|Backup failed"), a.Dedup.Payload)
+		assert.Equal(t, map[string]string{
+			"topic":  "PagerDuty-Data",
+			"region": "us-west-2",
+			"source": "sns-raw",
+		}, meta)
+	})
+
+	t.Run("nil subject uses first line", func(t *testing.T) {
+		a, _, ok := buildAlert(notification("first line\nsecond"))
+		require.True(t, ok)
+		assert.Equal(t, "first line", a.Summary)
+	})
+
+	t.Run("empty subject uses first line", func(t *testing.T) {
+		e := notification("hello")
+		e.Subject = strPtr("")
+		a, _, ok := buildAlert(e)
+		require.True(t, ok)
+		assert.Equal(t, "hello", a.Summary)
+	})
+
+	// Python's `subject or ...` treats "   " as truthy, which would sanitize to
+	// an empty summary.
+	t.Run("whitespace subject falls through", func(t *testing.T) {
+		e := notification("hello")
+		e.Subject = strPtr("   ")
+		a, _, ok := buildAlert(e)
+		require.True(t, ok)
+		assert.Equal(t, "hello", a.Summary)
+	})
+
+	t.Run("no subject and no message", func(t *testing.T) {
+		a, _, ok := buildAlert(notification(""))
+		require.True(t, ok)
+		assert.Equal(t, "SNS notification on PagerDuty-Data", a.Summary)
+		assert.Empty(t, a.Details)
+	})
+
+	t.Run("no subject no message no arn is still non empty", func(t *testing.T) {
+		a, _, ok := buildAlert(envelope{Type: typeNotification})
+		require.True(t, ok)
+		// Trailing space is trimmed by SanitizeText.
+		assert.Equal(t, "SNS notification on", a.Summary)
+	})
+
+	t.Run("plain text body", func(t *testing.T) {
+		a, _, ok := buildAlert(notification("just some text"))
+		require.True(t, ok)
+		assert.Equal(t, "just some text", a.Summary)
+	})
+
+	t.Run("json array body", func(t *testing.T) {
+		a, _, ok := buildAlert(notification("[1,2,3]"))
+		require.True(t, ok)
+		assert.Equal(t, "[1,2,3]", a.Summary)
+	})
+
+	t.Run("json object without alarm name", func(t *testing.T) {
+		a, _, ok := buildAlert(notification(`{"foo":"bar"}`))
+		require.True(t, ok)
+		assert.Equal(t, `{"foo":"bar"}`, a.Summary)
+	})
+
+	// This is why details are sanitized rather than raw-sliced: alert.Normalize
+	// rejects text that begins with a space or holds non-printables, which would
+	// otherwise 400 forever while SNS retried.
+	t.Run("leading newlines sanitized", func(t *testing.T) {
+		a, _, ok := buildAlert(notification("\n\n  hello  \n"))
+		require.True(t, ok)
+		assert.Equal(t, "hello", a.Details)
+		assert.Equal(t, "hello", a.Summary)
+	})
+
+	t.Run("control chars stripped", func(t *testing.T) {
+		a, _, ok := buildAlert(notification("bad\x00char"))
+		require.True(t, ok)
+		assert.Equal(t, "badchar", a.Details)
+	})
+
+	t.Run("over limit details truncated", func(t *testing.T) {
+		a, _, ok := buildAlert(notification(strings.Repeat("d", 300000)))
+		require.True(t, ok)
+		assert.Len(t, []rune(a.Details), alert.MaxDetailsLength)
+		assert.True(t, strings.HasSuffix(a.Details, "…"))
+	})
+
+	t.Run("same subject and topic dedup identically", func(t *testing.T) {
+		a := notification("body one")
+		a.Subject = strPtr("same")
+		b := notification("body two")
+		b.Subject = strPtr("same")
+
+		one, _, ok := buildAlert(a)
+		require.True(t, ok)
+		two, _, ok := buildAlert(b)
+		require.True(t, ok)
+
+		require.NotNil(t, one.Dedup)
+		require.NotNil(t, two.Dedup)
+		assert.Equal(t, one.Dedup.Payload, two.Dedup.Payload)
+	})
+}
+
+// Invariants that must hold for every mapped notification, checked across all
+// branches at once.
+func TestBuildAlert_Invariants(t *testing.T) {
+	longName := strings.Repeat("x", 1200)
+	cases := map[string]envelope{
+		"golden":               notification(goldenAlarm),
+		"ok":                   notification(strings.Replace(goldenAlarm, `"NewStateValue": "ALARM"`, `"NewStateValue": "OK"`, 1)),
+		"minimal alarm":        notification(`{"AlarmName":"x","NewStateValue":"ALARM"}`),
+		"blank alarm name":     notification(`{"AlarmName":"   ","NewStateValue":"ALARM"}`),
+		"long alarm name":      notification(`{"AlarmName":"` + longName + `","NewStateValue":"ALARM"}`),
+		"malformed arn":        {Type: typeNotification, TopicARN: "arn:aws:sns", Message: goldenAlarm},
+		"empty arn":            {Type: typeNotification, Message: goldenAlarm},
+		"raw plain":            notification("just some text"),
+		"raw empty":            notification(""),
+		"raw nothing at all":   {Type: typeNotification},
+		"raw control chars":    notification("bad\x00char"),
+		"raw leading newlines": notification("\n\n  hello  \n"),
+		"raw huge":             notification(strings.Repeat("d", 300000)),
+	}
+
+	for name, e := range cases {
+		t.Run(name, func(t *testing.T) {
+			a, meta, ok := buildAlert(e)
+			require.True(t, ok)
+
+			// Never fall back to the auto content hash: it changes on every state
+			// transition, which would break idempotency and the OK close.
+			require.NotNil(t, a.Dedup, "dedup must never be nil")
+			assert.Equal(t, alert.DedupTypeUser, a.Dedup.Type)
+			assert.Equal(t, 1, a.Dedup.Version)
+			assert.Len(t, a.Dedup.Payload, 64, "dedup payload should be a hex sha256")
+			assert.Same(t, a.Dedup, a.DedupKey())
+
+			assert.Equal(t, alert.SourceCloudwatch, a.Source)
+			assert.NotEmpty(t, a.Summary, "summary must never be empty")
+
+			// Proves the mapper can never produce a client error, and catches a
+			// missing SourceCloudwatch entry in alert.Normalize's OneOf.
+			a.ServiceID = testServiceID
+			_, err := a.Normalize()
+			assert.NoError(t, err)
+
+			total := 0
+			for k, v := range meta {
+				assert.NotEmpty(t, v, "meta[%s] should have been dropped", k)
+				assert.LessOrEqual(t, len([]rune(v)), maxMetaValueLen, "meta[%s]", k)
+				total += len(k) + len(v)
+			}
+			assert.Less(t, total, 32*1024, "metadata must stay inside the store cap")
+		})
+	}
+}
+
+// alert.Normalize collapses newlines in the summary and does a single pass of
+// double-space replacement, so three spaces become two rather than one.
+func TestNormalizeSummaryQuirks(t *testing.T) {
+	t.Run("three spaces collapse to two", func(t *testing.T) {
+		a, _, ok := buildAlert(notification(`{"AlarmName":"[us-west-2]   Too Many Errors","NewStateValue":"ALARM"}`))
+		require.True(t, ok)
+		assert.Equal(t, "[us-west-2]   Too Many Errors", a.Summary)
+
+		a.ServiceID = testServiceID
+		n, err := a.Normalize()
+		require.NoError(t, err)
+		assert.Equal(t, "[us-west-2]  Too Many Errors", n.Summary)
+	})
+
+	t.Run("newlines become a single space", func(t *testing.T) {
+		a, _, ok := buildAlert(notification(`{"AlarmName":"a\n\n\nb","NewStateValue":"ALARM"}`))
+		require.True(t, ok)
+		assert.Equal(t, "a\n\nb", a.Summary)
+
+		a.ServiceID = testServiceID
+		n, err := a.Normalize()
+		require.NoError(t, err)
+		assert.Equal(t, "a b", n.Summary)
+	})
+}
+
+// TestCleanMeta_StaysUnderByteBudget pins the fix for the byte-vs-rune gap: the
+// per-value cap (maxMetaValueLen) bounds RUNES, but alert.ValidateMetadata sums
+// BYTES, so multi-byte values at that cap can add up to more bytes than the
+// 32KiB total allows. cloudwatch's own 7 keys stay under the limit today only by
+// arithmetic coincidence (7 * 1024 runes * 4 bytes/rune < 32KiB); this test uses
+// enough keys to actually cross it, so a regression that drops the byte-budget
+// pass fails here regardless of alarmMeta's current key count.
+func TestCleanMeta_StaysUnderByteBudget(t *testing.T) {
+	wide := strings.Repeat("😀", maxMetaValueLen) // 1024 runes, 4 bytes each
+
+	m := make(map[string]string, 20)
+	for i := 0; i < 20; i++ {
+		m[fmt.Sprintf("key_%d", i)] = wide
+	}
+
+	out := cleanMeta(m)
+
+	total := 0
+	for k, v := range out {
+		total += len(k) + len(v)
+		require.True(t, utf8.ValidString(v), "truncation must not split a rune")
+	}
+	assert.Less(t, total, 32*1024)
+}

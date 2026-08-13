@@ -63,6 +63,20 @@ type Mutation {
   setAlertNoiseReason(input: SetAlertNoiseReasonInput!): Boolean!
     @deprecated(reason: "Use updateAlerts instead with the noiseReason field.")
 
+  """
+  setAlertMetadata merges the provided key/value pairs into an existing
+  alert's metadata, leaving any keys not listed untouched. Fails if the
+  alert is closed or does not exist.
+  """
+  setAlertMetadata(input: SetAlertMetadataInput!): Boolean!
+
+  """
+  appendAlertDetails appends text to an existing alert's Details, separated
+  by a blank line from whatever is already there. Fails if the alert is
+  closed or does not exist.
+  """
+  appendAlertDetails(input: AppendAlertDetailsInput!): Boolean!
+
   createService(input: CreateServiceInput!): Service
   createEscalationPolicy(input: CreateEscalationPolicyInput!): EscalationPolicy
   createEscalationPolicyStep(

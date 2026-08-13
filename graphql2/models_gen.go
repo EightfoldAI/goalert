@@ -103,6 +103,14 @@ type AlertsByStatus struct {
 	Closed  int `json:"closed"`
 }
 
+type AppendAlertDetailsInput struct {
+	AlertID int `json:"alertID"`
+	// Text appended to the alert's existing Details, separated by a blank line.
+	// The combined text is truncated to fit if it exceeds the details length
+	// limit.
+	Text string `json:"text"`
+}
+
 type AuthSubjectConnection struct {
 	Nodes    []user.AuthSubject `json:"nodes"`
 	PageInfo *PageInfo          `json:"pageInfo"`
@@ -719,6 +727,14 @@ type ServiceSearchOptions struct {
 	FavoritesFirst *bool `json:"favoritesFirst,omitempty"`
 }
 
+type SetAlertMetadataInput struct {
+	AlertID int `json:"alertID"`
+	// Meta keys provided here are merged into the alert's existing metadata;
+	// keys not listed are left untouched. There is no delete: an empty value is
+	// stored as an empty string and the key is still returned by Alert.meta.
+	Meta []AlertMetadataInput `json:"meta"`
+}
+
 type SetAlertNoiseReasonInput struct {
 	AlertID     int    `json:"alertID"`
 	NoiseReason string `json:"noiseReason"`
@@ -1325,6 +1341,8 @@ const (
 	IntegrationKeyTypeGrafana                IntegrationKeyType = "grafana"
 	IntegrationKeyTypeSite24x7               IntegrationKeyType = "site24x7"
 	IntegrationKeyTypePrometheusAlertmanager IntegrationKeyType = "prometheusAlertmanager"
+	IntegrationKeyTypeCloudwatch             IntegrationKeyType = "cloudwatch"
+	IntegrationKeyTypeAzureMonitor           IntegrationKeyType = "azureMonitor"
 	IntegrationKeyTypeEmail                  IntegrationKeyType = "email"
 	IntegrationKeyTypeUniversal              IntegrationKeyType = "universal"
 )
@@ -1334,13 +1352,15 @@ var AllIntegrationKeyType = []IntegrationKeyType{
 	IntegrationKeyTypeGrafana,
 	IntegrationKeyTypeSite24x7,
 	IntegrationKeyTypePrometheusAlertmanager,
+	IntegrationKeyTypeCloudwatch,
+	IntegrationKeyTypeAzureMonitor,
 	IntegrationKeyTypeEmail,
 	IntegrationKeyTypeUniversal,
 }
 
 func (e IntegrationKeyType) IsValid() bool {
 	switch e {
-	case IntegrationKeyTypeGeneric, IntegrationKeyTypeGrafana, IntegrationKeyTypeSite24x7, IntegrationKeyTypePrometheusAlertmanager, IntegrationKeyTypeEmail, IntegrationKeyTypeUniversal:
+	case IntegrationKeyTypeGeneric, IntegrationKeyTypeGrafana, IntegrationKeyTypeSite24x7, IntegrationKeyTypePrometheusAlertmanager, IntegrationKeyTypeCloudwatch, IntegrationKeyTypeAzureMonitor, IntegrationKeyTypeEmail, IntegrationKeyTypeUniversal:
 		return true
 	}
 	return false

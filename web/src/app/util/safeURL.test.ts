@@ -87,4 +87,12 @@ describe('safeURL', () => {
       '[https://example.com/query?foo=1&bar=2](https://example.com/query?foo=1&bar=3)', // bar doesn't match
     ],
   })
+
+  checkIt('should match when label and url share percent-encoding', {
+    true: [
+      '[https://example.com/path%20with%20spaces](https://example.com/path%20with%20spaces)',
+      '[https://example.com/a%20b#frag](https://example.com/a%20b#frag)',
+    ],
+    false: [],
+  })
 })

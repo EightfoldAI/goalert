@@ -5,7 +5,7 @@ import _ from 'lodash'
 // It tries to determine if the label is misleading.
 export function safeURL(_url: string, _label: string): boolean {
   const url = decodeURI(_.unescape(_url))
-  const label = _.unescape(_label)
+  const label = decodeURI(_.unescape(_label))
 
   if (url.startsWith('mailto:')) {
     const email = url.slice(7)

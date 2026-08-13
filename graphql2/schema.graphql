@@ -421,6 +421,28 @@ input AlertMetadataInput {
   value: String!
 }
 
+input SetAlertMetadataInput {
+  alertID: Int!
+
+  """
+  Meta keys provided here are merged into the alert's existing metadata;
+  keys not listed are left untouched. There is no delete: an empty value is
+  stored as an empty string and the key is still returned by Alert.meta.
+  """
+  meta: [AlertMetadataInput!]!
+}
+
+input AppendAlertDetailsInput {
+  alertID: Int!
+
+  """
+  Text appended to the alert's existing Details, separated by a blank line.
+  The combined text is truncated to fit if it exceeds the details length
+  limit.
+  """
+  text: String!
+}
+
 input CreateAlertInput {
   summary: String!
   details: String
@@ -1215,6 +1237,8 @@ enum IntegrationKeyType {
   grafana
   site24x7
   prometheusAlertmanager
+  cloudwatch
+  azureMonitor
   email
   universal
 }
